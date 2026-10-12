@@ -109,6 +109,12 @@ pub fn system_action(a: OnQueueDone) {
                 run("systemctl", &["suspend"]);
             }
         }
+        OnQueueDone::HangUp => {
+            // Ends all dial-up, PPPoE and built-in VPN connections.
+            if cfg!(windows) {
+                run("rasdial", &["/disconnect"]);
+            }
+        }
         OnQueueDone::Hibernate => {
             if cfg!(windows) {
                 run("shutdown", &["/h"]);

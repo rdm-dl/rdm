@@ -780,9 +780,9 @@ fn scheduler(app: &mut App, ctx: &egui::Context) {
                     });
                     ui.label(RichText::new("No days selected = every day").small().weak());
                     ui.checkbox(&mut s.once, "Run only once");
-                    egui::ComboBox::from_label("When the queue finishes").selected_text(format!("{:?}", s.on_done)).show_ui(ui, |ui| {
-                        for a in [OnQueueDone::Nothing, OnQueueDone::ExitApp, OnQueueDone::Sleep, OnQueueDone::Hibernate, OnQueueDone::Shutdown] {
-                            ui.selectable_value(&mut s.on_done, a, format!("{a:?}"));
+                    egui::ComboBox::from_label("When the queue finishes").selected_text(s.on_done.label()).show_ui(ui, |ui| {
+                        for a in OnQueueDone::all() {
+                            ui.selectable_value(&mut s.on_done, a, a.label());
                         }
                     });
                 });

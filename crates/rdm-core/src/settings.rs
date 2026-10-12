@@ -38,6 +38,30 @@ pub enum OnQueueDone {
     Sleep,
     Hibernate,
     Shutdown,
+    /// Disconnect dial-up / VPN connections ("hang up the modem").
+    HangUp,
+}
+
+impl OnQueueDone {
+    /// Every action offered on this system.
+    pub fn all() -> Vec<Self> {
+        let mut v = vec![Self::Nothing, Self::ExitApp, Self::Sleep, Self::Hibernate, Self::Shutdown];
+        if cfg!(windows) {
+            v.push(Self::HangUp);
+        }
+        v
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Nothing => "Do nothing",
+            Self::ExitApp => "Exit RDM",
+            Self::Sleep => "Put the computer to sleep",
+            Self::Hibernate => "Hibernate the computer",
+            Self::Shutdown => "Shut down the computer",
+            Self::HangUp => "Hang up (disconnect dial-up / VPN)",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

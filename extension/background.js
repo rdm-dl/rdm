@@ -823,20 +823,25 @@ function ytEntries(v) {
     audios.filter((a) => containerOf(a) === container).sort((x, y) => (y.audioDefault - x.audioDefault) || y.bitrate - x.bitrate)[0];
   const base = { kind: "yt", videoId: v.videoId, title: v.title, duration: v.duration, found: v.found };
   const out = [];
+  const codec = (f) => (/avc1/i.test(f.mime) ? "H.264" : /av01/i.test(f.mime) ? "AV1" : /vp0?9/i.test(f.mime) ? "VP9" : "");
   for (const h of [...new Set(videos.map((f) => f.h))].sort((a, b) => b - a)) {
     const at = videos.filter((f) => f.h === h).sort((x, y) => y.fps - x.fps || y.bitrate - x.bitrate);
-    // Prefer MP4 (plays everywhere); WebM where that's all there is at this height.
-    for (const container of ["mp4", "webm"]) {
-      const vid = at.find((f) => containerOf(f) === container);
-      const aud = vid && (bestAudio(container) || bestAudio(container === "mp4" ? "webm" : "mp4"));
-      if (vid && aud) {
-        out.push({ ...base, label: vid.label || `${h}p`, container: container.toUpperCase(), ext: containerOf(aud) === container ? container : "mkv", fps: vid.fps, size: vid.clen + aud.clen, itagV: vid.itag, itagA: aud.itag });
-        break;
-      }
+    // Each format offered at this quality: MP4 (H.264 preferred — plays everywhere — else
+    // AV1) and WebM (VP9), each with the matching audio.
+    const mp4 = at.find((f) => containerOf(f) === "mp4" && codec(f) === "H.264") || at.find((f) => containerOf(f) === "mp4");
+    const webm = at.find((f) => containerOf(f) === "webm");
+    for (const vid of [mp4, webm].filter(Boolean)) {
+      const container = containerOf(vid);
+      const aud = bestAudio(container) || bestAudio(container === "mp4" ? "webm" : "mp4");
+      if (!aud) continue;
+      const kind = [container.toUpperCase(), codec(vid)].filter(Boolean).join(" · ");
+      out.push({ ...base, label: vid.label || `${h}p`, container: kind, ext: containerOf(aud) === container ? container : "mkv", fps: vid.fps, size: vid.clen + aud.clen, itagV: vid.itag, itagA: aud.itag });
     }
   }
-  const a = bestAudio("mp4") || bestAudio("webm");
-  if (a) out.push({ ...base, label: "Audio", container: containerOf(a) === "mp4" ? "M4A" : "WEBM", ext: containerOf(a) === "mp4" ? "m4a" : "webm", fps: 0, size: a.clen, itagV: 0, itagA: a.itag });
+  for (const a of [bestAudio("mp4"), bestAudio("webm")].filter(Boolean)) {
+    const mp4 = containerOf(a) === "mp4";
+    out.push({ ...base, label: "Audio", container: mp4 ? "M4A · AAC" : "WEBM · Opus", ext: mp4 ? "m4a" : "webm", fps: 0, size: a.clen, itagV: 0, itagA: a.itag });
+  }
   if (!out.length) out.push({ kind: "yt-note", title: v.title, text: "Play the video for a few seconds, then open this menu again." });
   return out;
 }

@@ -866,7 +866,7 @@ impl App {
             let mut cancel = false;
             egui::Modal::new(egui::Id::new("queue_action")).show(ctx, |ui| {
                 ui.label(RichText::new("Queue finished").font(theme::semibold(16.0)));
-                ui.label(format!("{action:?} in {left} seconds"));
+                ui.label(format!("The queue has finished. {} in {left} seconds.", action.label()));
                 if theme::button(ui, Kind::Ghost, icon::X, "Cancel", true).clicked() {
                     cancel = true;
                 }
