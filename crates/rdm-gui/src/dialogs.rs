@@ -358,7 +358,8 @@ fn file_info(app: &mut App, ctx: &egui::Context) {
                     Some(t) => format!("{}{}", util::size(t), if p.resumable { "" } else { "  (no resume support)" }),
                     None => "unknown".into(),
                 }),
-                Some(Err(e)) => ui.label(RichText::new(e).color(egui::Color32::from_rgb(210, 90, 90))),
+                // The size check failing doesn't stop the download; say so quietly.
+                Some(Err(e)) => ui.label("Unknown").on_hover_text(format!("Couldn't check the size: {e}")),
             };
             ui.end_row();
             ui.label("Description");

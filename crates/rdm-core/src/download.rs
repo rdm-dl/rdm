@@ -1030,6 +1030,10 @@ pub struct ProbeInfo {
 
 /// Request the URL, read only the headers, and report name/size/range support.
 pub async fn probe_info(req: &DownloadRequest, cfg: &EngineConfig) -> Result<ProbeInfo> {
+    // A YouTube job isn't fetched until it starts; report what the extension knows.
+    if crate::youtube::is_job(&req.url) {
+        return Ok(crate::youtube::probe_info(req));
+    }
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
     let client = build_client(cfg, req)?;
     let r = probe(&client, &url, req, Some(0), None).await?;

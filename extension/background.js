@@ -247,7 +247,8 @@ function loadState() {
   if (!loaded) {
     loaded = (async () => {
       try {
-        const s = await api.storage.session.get(["media", "yt"]);
+        const s = await api.storage.session.get(["media", "yt", "diag"]);
+        if (Array.isArray(s.diag)) diagLog.unshift(...s.diag.slice(-300));
         for (const [tab, list] of Object.entries(s.yt || {})) {
           const videos = ytVideos(+tab);
           for (const v of list) if (!videos.has(v.videoId)) videos.set(v.videoId, v);
@@ -271,7 +272,7 @@ function saveState() {
     const ytOut = {};
     for (const [tab, videos] of yt) ytOut[tab] = [...videos.values()].sort((a, b) => b.found - a.found).slice(0, 5);
     try {
-      api.storage.session.set({ media: out, yt: ytOut });
+      api.storage.session.set({ media: out, yt: ytOut, diag: diagLog.slice(-300) });
     } catch {}
   }, 300);
 }
@@ -467,6 +468,7 @@ async function downloadMedia(msg, tab) {
       video_id: msg.videoId,
       itag_video: msg.itagV || 0,
       itag_audio: msg.itagA || 0,
+      size: msg.size || 0,
       title: msg.title || (v && v.title) || "",
       visitor_data: (v && v.visitorData) || "",
       player_js_url: (v && v.jsUrl) || "",
@@ -510,6 +512,7 @@ function diag(event, detail) {
   diagLog.push({ t: new Date().toISOString().slice(11, 23), event, ...detail });
   if (diagLog.length > 300) diagLog.splice(0, diagLog.length - 300);
   scheduleDiag();
+  saveState();
 }
 
 let diagTimer = 0;
@@ -519,6 +522,7 @@ function scheduleDiag() {
 }
 
 async function writeDiag() {
+  await loadState();
   const tabs = {};
   for (const [tabId, videos] of yt) {
     tabs[tabId] = [...videos.values()].map((v) => ({

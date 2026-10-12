@@ -294,7 +294,7 @@
       menu.append(el("div", "head", t ? `Video · ${t}` : "Video"));
       for (const s of site) {
         const meta = [s.container, s.fps > 30 ? `${s.fps}fps` : "", fmtSize(s.size), fmtDur(s.duration)].filter(Boolean).join(" · ");
-        menu.append(entry(s.label, meta, () => send({ type: "download-media", kind: "yt", videoId: s.videoId, itagV: s.itagV, itagA: s.itagA, title: s.title, ext: s.ext })));
+        menu.append(entry(s.label, meta, () => send({ type: "download-media", kind: "yt", videoId: s.videoId, itagV: s.itagV, itagA: s.itagA, size: s.size, title: s.title, ext: s.ext })));
       }
       for (const n of siteNotes) menu.append(el("div", "note", n.text));
     }

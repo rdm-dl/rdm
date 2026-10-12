@@ -334,6 +334,21 @@ pub async fn resolve(req: &DownloadRequest, cfg: &EngineConfig) -> Result<Downlo
     })
 }
 
+/// What the add dialog shows for a job: the name and the size the extension sent (video +
+/// audio of the chosen quality), without contacting the site.
+pub fn probe_info(req: &DownloadRequest) -> crate::download::ProbeInfo {
+    let job: Value = req.post_data.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or(Value::Null);
+    crate::download::ProbeInfo {
+        file_name: req.file_name.clone().unwrap_or_else(|| job["title"].as_str().map(|t| format!("{t}.mp4")).unwrap_or_default()),
+        total: job["size"].as_u64().filter(|s| *s > 0),
+        content_type: Some("video/mp4".into()),
+        resumable: true,
+        final_url: req.url.clone(),
+        last_modified: None,
+        etag: None,
+    }
+}
+
 /// Stream links change on every request; for resuming, two links name the same stream if
 /// they are the same format of the same video.
 pub fn same_stream(a: &str, b: &str) -> bool {

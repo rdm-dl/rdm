@@ -62,7 +62,15 @@ pub fn open_file(p: &Path) {
 pub fn open_folder(p: &Path) {
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("explorer").arg(format!("/select,{}", p.display())).spawn();
+        use std::os::windows::process::CommandExt;
+        // Explorer wants `/select,"path"` exactly; normal argument quoting would wrap the
+        // whole thing and make it open the default folder instead.
+        let path = p.to_string_lossy().replace('/', "\\");
+        if p.exists() {
+            let _ = Command::new("explorer").raw_arg(format!("/select,\"{path}\"")).spawn();
+        } else if let Some(dir) = p.parent().filter(|d| d.exists()) {
+            let _ = Command::new("explorer").raw_arg(format!("\"{}\"", dir.to_string_lossy().replace('/', "\\"))).spawn();
+        }
     }
     #[cfg(target_os = "macos")]
     {
