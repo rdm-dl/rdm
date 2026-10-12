@@ -1,6 +1,7 @@
 //! Main window: sidebar, header, download list, progress windows, popups.
 
 use crate::dialogs::{self, AddUrl, Batch, FileInfo, Options, Scheduler, SpeedLimit};
+use crate::grabber_ui::Grabber;
 use crate::theme::{self, Kind, icon};
 use crate::tray::{Tray, TrayAction};
 use crate::util;
@@ -42,6 +43,7 @@ pub struct App {
     pub options: Option<Options>,
     pub scheduler: Option<Scheduler>,
     pub speed_limit: Option<SpeedLimit>,
+    pub grabber: Option<Grabber>,
     progress_windows: BTreeSet<ItemId>,
     completed: VecDeque<ItemId>,
     confirm_delete: Option<Vec<ItemId>>,
@@ -90,6 +92,7 @@ impl App {
             options: None,
             scheduler: None,
             speed_limit: None,
+            grabber: None,
             progress_windows: BTreeSet::new(),
             completed: VecDeque::new(),
             confirm_delete: None,
@@ -307,6 +310,9 @@ impl App {
                 let more = theme::icon_button(ui, icon::DOTS_THREE, "More");
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(220.0);
+                    if ui.button(theme::mi(icon::GLOBE, "Site grabber…")).clicked() {
+                        self.grabber = Some(Grabber::default());
+                    }
                     if ui.button(theme::mi(icon::LIST_CHECKS, "Batch download…")).clicked() {
                         self.batch = Some(Batch::default());
                     }
@@ -949,6 +955,7 @@ impl eframe::App for App {
             }
         }
         dialogs::show_all(self, &ctx);
+        crate::grabber_ui::show(self, &ctx);
         self.popups(&ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
     }

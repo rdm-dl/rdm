@@ -4,6 +4,7 @@ pub mod chunks;
 pub mod config;
 pub mod ipc;
 pub mod download;
+pub mod grabber;
 pub mod hls;
 pub mod limiter;
 pub mod manager;
