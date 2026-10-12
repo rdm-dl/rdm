@@ -649,6 +649,11 @@ async fn run_inner(
     if let Some(n) = req.max_connections {
         cfg.max_connections = n.max(1);
     }
+    // YouTube jobs become a plain stream (or video + audio pair) request first.
+    if crate::youtube::is_job(&req.url) {
+        let resolved = crate::youtube::resolve(req, &cfg).await?;
+        return Box::pin(run_inner(&resolved, cfg, temp_dir, global_limiter, limiter, progress, control)).await;
+    }
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
     let client = build_client(&cfg, req)?;
     let tmp = TempDir::new(&temp_dir)?;
@@ -664,7 +669,7 @@ async fn run_inner(
     if crate::dash::looks_like_dash(&req.url, None) {
         return crate::dash::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
     }
-    let saved = tmp.load().ok().flatten().filter(|s| s.url == req.url && s.resumable);
+    let saved = tmp.load().ok().flatten().filter(|s| crate::youtube::same_stream(&s.url, &req.url) && s.resumable);
 
     // Probe (fresh) or validate (resume).
     let (map, info, first_resp, first_id, single) = match saved {

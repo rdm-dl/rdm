@@ -40,6 +40,15 @@
   const PLAYER_API = /\/youtubei\/v1\/player\b/;
   let lastYt = "";
 
+  function cfg(key) {
+    try {
+      const v = window.ytcfg && window.ytcfg.get && window.ytcfg.get(key);
+      return v == null ? "" : v;
+    } catch {
+      return "";
+    }
+  }
+
   function ytReport(resp) {
     try {
       if (!resp || !resp.streamingData || !resp.videoDetails) return;
@@ -74,8 +83,12 @@
         sabr: !!sd.serverAbrStreamingUrl,
         sabrUrl: sd.serverAbrStreamingUrl || "",
         ustreamer: (((resp.playerConfig || {}).mediaCommonConfig || {}).mediaUstreamerRequestConfig || {}).videoPlaybackUstreamerConfig || "",
-        clientVersion: (window.ytcfg && window.ytcfg.get && window.ytcfg.get("INNERTUBE_CLIENT_VERSION")) || "",
-        visitorData: (window.ytcfg && window.ytcfg.get && window.ytcfg.get("VISITOR_DATA")) || "",
+        // Page config the downloader needs to request streams the way the page does.
+        clientVersion: cfg("INNERTUBE_CLIENT_VERSION"),
+        visitorData: cfg("VISITOR_DATA"),
+        jsUrl: abs(cfg("PLAYER_JS_URL")),
+        sessionIndex: String(cfg("SESSION_INDEX")),
+        loggedIn: !!cfg("LOGGED_IN"),
       };
       const key = data.videoId + ":" + data.formats.length + ":" + data.formats.filter((f) => f.url).length;
       if (key === lastYt) return;

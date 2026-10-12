@@ -93,7 +93,7 @@ async function init() {
       meta.className = "meta";
       meta.textContent = [m.container, m.fps > 30 ? `${m.fps}fps` : "", fmtSize(m.size), fmtDur(m.duration)].filter(Boolean).join(" · ");
       info.append(name, meta);
-      li.append(info, button("Download", () => api.runtime.sendMessage({ type: "download-media", tabId: tab?.id, kind: "yt", url: m.video, audio: m.audio, title: m.title, ext: m.ext })));
+      li.append(info, button("Download", () => api.runtime.sendMessage({ type: "download-media", tabId: tab?.id, kind: "yt", videoId: m.videoId, itagV: m.itagV, itagA: m.itagA, title: m.title, ext: m.ext })));
       list.append(li);
       continue;
     }

@@ -15,6 +15,8 @@ pub mod naming;
 pub mod pair;
 pub mod settings;
 pub mod storage;
+pub mod youtube;
+pub mod ytsolve;
 
 pub use config::EngineConfig;
 pub use download::{ChunkView, Control, Download, DownloadError, DownloadHandle, DownloadRequest, ProbeInfo, Progress, Status, probe_info};

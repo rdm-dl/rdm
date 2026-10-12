@@ -460,10 +460,25 @@ function pairUrl(video, audio) {
 
 async function downloadMedia(msg, tab) {
   if (msg.kind === "yt") {
-    const url = msg.audio ? pairUrl(msg.url, msg.audio) : msg.url;
+    // RDM makes its own player request with this page's session (the way the page does),
+    // unlocks the links with the player script, and downloads video + audio.
+    const v = tab && tab.id != null ? yt.get(tab.id)?.get(msg.videoId) : null;
+    const job = {
+      video_id: msg.videoId,
+      itag_video: msg.itagV || 0,
+      itag_audio: msg.itagA || 0,
+      title: msg.title || (v && v.title) || "",
+      visitor_data: (v && v.visitorData) || "",
+      player_js_url: (v && v.jsUrl) || "",
+      client_version: (v && v.clientVersion) || "",
+      session_index: (v && v.sessionIndex) || "",
+      logged_in: !!(v && v.loggedIn),
+      pot: (v && v.pot) || "",
+    };
+    const watch = `https://www.youtube.com/watch?v=${msg.videoId}#rdm-yt`;
     return send({
       type: "download",
-      ...(await payload(url, { referrer: tab?.url || "", filename: safeName(msg.title || tab?.title, msg.ext || "mp4") })),
+      ...(await payload(watch, { referrer: tab?.url || "", filename: safeName(job.title || tab?.title, msg.ext || "mp4"), postData: JSON.stringify(job) })),
     });
   }
   const quality = msg.quality ? `#rdm-quality=${msg.quality}` : "";
@@ -622,6 +637,33 @@ function ytOnRequest(d, replay) {
       }
     }
   }
+  // The player's streaming request (POST, sabr=1): its body carries the session's
+  // proof-of-origin token, which RDM adds to the stream links it builds.
+  if (d.method === "POST" && q.get("sabr") === "1") {
+    const latest = videos && videos.size ? [...videos.values()].sort((a, b) => b.found - a.found)[0] : null;
+    const raw = d.requestBody && d.requestBody.raw && d.requestBody.raw[0] && d.requestBody.raw[0].bytes;
+    let pot = "";
+    let shape = "";
+    if (raw) {
+      const bytes = new Uint8Array(raw);
+      const top = protoFields(bytes);
+      shape = top.map((f) => `${f.field}:${f.bytes ? f.bytes.length : f.value}`).join(",").slice(0, 300);
+      const ctx = top.find((f) => f.field === 19 && f.bytes);
+      const tok = ctx && protoFields(ctx.bytes).find((f) => f.field === 2 && f.bytes && f.bytes.length >= 16);
+      if (tok) pot = b64url(tok.bytes);
+    }
+    diag("sabr-body", { tabId: d.tabId, videoId: latest && latest.videoId, bodyBytes: raw ? raw.byteLength : 0, shape, pot: pot ? `${pot.length} chars` : "" });
+    if (latest) {
+      latest.sabrSeen = true;
+      if (pot) {
+        const fresh = latest.pot !== pot;
+        latest.pot = pot;
+        latest.potAt = Date.now();
+        if (fresh) saveState();
+      }
+    }
+    return;
+  }
   if (!target) {
     if (!replay) {
       const list = ytPending.get(d.tabId) || [];
@@ -630,7 +672,7 @@ function ytOnRequest(d, replay) {
     }
     return;
   }
-  if (d.method !== "GET" || q.get("sabr") === "1" || !itag) {
+  if (d.method !== "GET" || !itag) {
     target.sabrSeen = true;
     return;
   }
@@ -653,7 +695,45 @@ function ytOnRequest(d, replay) {
   }
 }
 
-api.webRequest.onBeforeRequest.addListener((d) => ytOnRequest(d, false), { urls: ["*://*.googlevideo.com/videoplayback*"] });
+api.webRequest.onBeforeRequest.addListener((d) => ytOnRequest(d, false), { urls: ["*://*.googlevideo.com/videoplayback*"] }, ["requestBody"]);
+
+// Minimal protobuf reader: top-level fields of a message (varints and length-delimited).
+function protoFields(b) {
+  const out = [];
+  let i = 0;
+  const varint = () => {
+    let v = 0;
+    let mul = 1;
+    for (let k = 0; k < 10 && i < b.length; k++) {
+      const x = b[i++];
+      v += (x & 0x7f) * mul;
+      mul *= 128;
+      if (!(x & 0x80)) return v;
+    }
+    return v;
+  };
+  while (i < b.length) {
+    const key = varint();
+    const field = Math.floor(key / 8);
+    const wire = key % 8;
+    if (wire === 0) out.push({ field, value: varint() });
+    else if (wire === 2) {
+      const len = varint();
+      if (i + len > b.length) break;
+      out.push({ field, bytes: b.subarray(i, i + len) });
+      i += len;
+    } else if (wire === 1) i += 8;
+    else if (wire === 5) i += 4;
+    else break;
+  }
+  return out;
+}
+
+function b64url(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
 // Unlocked URL for a format, if one can be built.
 function ytUrl(v, f) {
@@ -680,7 +760,35 @@ const isAudioOnly = (f) => f.mime.startsWith("audio/");
 const isMuxed = (f) => f.mime.startsWith("video/") && /mp4a|opus|vorbis/i.test(f.mime);
 const containerOf = (f) => (/webm/i.test(f.mime) ? "webm" : "mp4");
 
+// Every quality the page lists. RDM itself unlocks the stream links (own player request +
+// the player script's signature / n functions), so no URL is needed here.
 function ytEntries(v) {
+  const fmts = v.formats.filter((f) => !f.drm && f.itag);
+  const videos = fmts.filter(isVideoOnly);
+  const audios = fmts.filter(isAudioOnly);
+  const bestAudio = (container) =>
+    audios.filter((a) => containerOf(a) === container).sort((x, y) => (y.audioDefault - x.audioDefault) || y.bitrate - x.bitrate)[0];
+  const base = { kind: "yt", videoId: v.videoId, title: v.title, duration: v.duration, found: v.found };
+  const out = [];
+  for (const h of [...new Set(videos.map((f) => f.h))].sort((a, b) => b - a)) {
+    const at = videos.filter((f) => f.h === h).sort((x, y) => y.fps - x.fps || y.bitrate - x.bitrate);
+    // Prefer MP4 (plays everywhere); WebM where that's all there is at this height.
+    for (const container of ["mp4", "webm"]) {
+      const vid = at.find((f) => containerOf(f) === container);
+      const aud = vid && (bestAudio(container) || bestAudio(container === "mp4" ? "webm" : "mp4"));
+      if (vid && aud) {
+        out.push({ ...base, label: vid.label || `${h}p`, container: container.toUpperCase(), ext: containerOf(aud) === container ? container : "mkv", fps: vid.fps, size: vid.clen + aud.clen, itagV: vid.itag, itagA: aud.itag });
+        break;
+      }
+    }
+  }
+  const a = bestAudio("mp4") || bestAudio("webm");
+  if (a) out.push({ ...base, label: "Audio", container: containerOf(a) === "mp4" ? "M4A" : "WEBM", ext: containerOf(a) === "mp4" ? "m4a" : "webm", fps: 0, size: a.clen, itagV: 0, itagA: a.itag });
+  if (!out.length) out.push({ kind: "yt-note", title: v.title, text: "Play the video for a few seconds, then open this menu again." });
+  return out;
+}
+
+function ytEntriesFromLinks(v) {
   const usable = v.formats.filter((f) => !f.drm).map((f) => ({ ...f, live: ytUrl(v, f) }));
   const audios = usable.filter((f) => isAudioOnly(f) && f.live);
   const bestAudio = (container) =>
