@@ -475,7 +475,7 @@ async function downloadMedia(msg, tab) {
       client_version: (v && v.clientVersion) || "",
       session_index: (v && v.sessionIndex) || "",
       logged_in: !!(v && v.loggedIn),
-      pot: (v && v.pot) || "",
+      pot: (v && v.pot) || (tab && tab.id != null && tabPot.get(tab.id)) || "",
     };
     const watch = `https://www.youtube.com/watch?v=${msg.videoId}#rdm-yt`;
     return send({
@@ -617,6 +617,7 @@ function ytOnPlayer(tabId, data) {
   notifyTab(tabId);
 }
 
+const tabPot = new Map(); // tabId -> latest token from that tab's player
 const ytPending = new Map(); // tabId -> recent requests not matched yet
 
 function ytOnRequest(d, replay) {
@@ -657,6 +658,7 @@ function ytOnRequest(d, replay) {
       if (tok) pot = b64url(tok.bytes);
     }
     diag("sabr-body", { tabId: d.tabId, videoId: latest && latest.videoId, bodyBytes: raw ? raw.byteLength : 0, shape, pot: pot ? `${pot.length} chars` : "" });
+    if (pot) tabPot.set(d.tabId, pot);
     if (latest) {
       latest.sabrSeen = true;
       if (pot) {

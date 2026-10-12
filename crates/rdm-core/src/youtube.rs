@@ -309,6 +309,13 @@ pub async fn resolve(req: &DownloadRequest, cfg: &EngineConfig) -> Result<Downlo
     let resp2 = resp.clone();
     let formats = tokio::task::spawn_blocking(move || unlock_all(&resp2, &s2, &pot)).await.map_err(err)?;
     let (video, audio) = choose(&formats, &job).ok_or_else(|| err("no downloadable formats"))?;
+    if std::env::var_os("RDM_YT_DEBUG").is_some() {
+        eprintln!("[yt] player {} sts {} sig {:?} n {:?}", job.player_js_url, solver.solved.sts, solver.solved.sig, solver.solved.n);
+        eprintln!("[yt] playability {:?}, {} formats unlocked, pot {} chars", playable(&resp), formats.len(), job.pot.len());
+        for f in [video.as_ref(), Some(&audio)].into_iter().flatten() {
+            eprintln!("[yt] itag {} {} clen {} url {}", f.itag, f.mime, f.clen, f.url);
+        }
+    }
     let ext = match &video {
         Some(v) => v.container(),
         None if audio.container() == "mp4" => "m4a",

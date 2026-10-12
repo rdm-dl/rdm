@@ -302,6 +302,12 @@ fn build_client(cfg: &EngineConfig, req: &DownloadRequest) -> Result<Client> {
     }
     let ua = req.user_agent.clone().unwrap_or_else(|| cfg.user_agent.clone());
     let mut builder = Client::builder();
+    // YouTube stream links are issued to one client address (`ip=`); connect from the same
+    // address family, or a dual-stack machine may reach the server over the other one and
+    // be refused.
+    if let Some(ip) = Url::parse(&req.url).ok().filter(|u| u.host_str().is_some_and(|h| h.ends_with(".googlevideo.com"))).and_then(|u| u.query_pairs().find(|(k, _)| k == "ip").and_then(|(_, v)| v.parse::<std::net::IpAddr>().ok())) {
+        builder = builder.local_address(if ip.is_ipv4() { std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) } else { std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED) });
+    }
     match cfg.proxy.as_deref() {
         None | Some("") | Some("system") => {}
         Some("none") => builder = builder.no_proxy(),
@@ -585,22 +591,42 @@ async fn worker_inner(ctx: &Arc<Ctx>, id_ref: &mut u32, mut first: Option<Respon
     }
 }
 
+/// YouTube refuses a freshly issued stream link (HTTP 403) for roughly the first 10–15
+/// seconds, then serves it normally; how long to keep asking before giving up.
+const FRESH_LINK_WAIT: Duration = Duration::from_secs(60);
+
+fn is_youtube_stream(url: &Url) -> bool {
+    url.host_str().is_some_and(|h| h.ends_with(".googlevideo.com"))
+}
+
 async fn probe(ctx_client: &Client, url: &Url, req: &DownloadRequest, range_from: Option<u64>, validator: Option<&str>) -> Result<Response> {
-    let mut rb = match &req.post_data {
-        Some(body) => ctx_client.post(url.clone()).body(body.clone()),
-        None => ctx_client.get(url.clone()),
-    };
-    if let Some(from) = range_from {
-        rb = rb.header(header::RANGE, format!("bytes={from}-"));
-        if let Some(v) = validator {
-            rb = rb.header(header::IF_RANGE, v);
+    let started = Instant::now();
+    let r = loop {
+        let mut rb = match &req.post_data {
+            Some(body) => ctx_client.post(url.clone()).body(body.clone()),
+            None => ctx_client.get(url.clone()),
+        };
+        if let Some(from) = range_from {
+            rb = rb.header(header::RANGE, format!("bytes={from}-"));
+            if let Some(v) = validator {
+                rb = rb.header(header::IF_RANGE, v);
+            }
         }
-    }
-    if let Some(u) = &req.username {
-        rb = rb.basic_auth(u, req.password.as_deref());
-    }
-    let r = rb.send().await?;
+        if let Some(u) = &req.username {
+            rb = rb.basic_auth(u, req.password.as_deref());
+        }
+        let r = rb.send().await?;
+        if r.status() == StatusCode::FORBIDDEN && is_youtube_stream(url) && started.elapsed() < FRESH_LINK_WAIT {
+            drop(r);
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            continue;
+        }
+        break r;
+    };
     if !r.status().is_success() {
+        if std::env::var_os("RDM_YT_DEBUG").is_some() {
+            eprintln!("[http] {} {} -> {} {:?}\n[http] response headers: {:?}", if req.post_data.is_some() { "POST" } else { "GET" }, url, r.status(), r.version(), r.headers());
+        }
         return Err(DownloadError::Status(r.status()));
     }
     Ok(r)
