@@ -2,6 +2,7 @@
 
 use crate::dialogs::{self, AddUrl, Batch, FileInfo, Options, Scheduler, SpeedLimit};
 use crate::theme::{self, Kind, icon};
+use crate::tray::{Tray, TrayAction};
 use crate::util;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
 use rdm_core::ipc::UiRequest;
@@ -50,6 +51,8 @@ pub struct App {
     last_clip: String,
     last_clip_check: Instant,
     status_msg: Option<(String, Instant)>,
+    tray: Option<Tray>,
+    exiting: bool,
 }
 
 fn category_icon(name: &str) -> &'static str {
@@ -64,7 +67,13 @@ fn category_icon(name: &str) -> &'static str {
 }
 
 impl App {
-    pub fn new(rt: tokio::runtime::Handle, manager: Manager, ui_rx: mpsc::UnboundedReceiver<UiRequest>, initial: Vec<DownloadRequest>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        rt: tokio::runtime::Handle,
+        manager: Manager,
+        ui_rx: mpsc::UnboundedReceiver<UiRequest>,
+        initial: Vec<DownloadRequest>,
+    ) -> Self {
         let events = manager.subscribe();
         let mut app = Self {
             rt,
@@ -90,6 +99,8 @@ impl App {
             last_clip: String::new(),
             last_clip_check: Instant::now(),
             status_msg: None,
+            tray: crate::tray::create(ctx.clone()),
+            exiting: false,
         };
         if let Some(cb) = app.clipboard.as_mut() {
             app.last_clip = cb.get_text().unwrap_or_default();
@@ -880,9 +891,38 @@ fn segment_bar(ui: &mut egui::Ui, it: &Item) {
 }
 
 impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_external(ctx);
+        let actions: Vec<TrayAction> = self.tray.as_ref().map(|t| t.rx.try_iter().collect()).unwrap_or_default();
+        for a in actions {
+            match a {
+                TrayAction::Show | TrayAction::NewDownload => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    if a == TrayAction::NewDownload {
+                        self.new_download();
+                    }
+                }
+                TrayAction::PauseAll => self.manager.stop_all(),
+                TrayAction::ResumeAll => self.manager.start_all(),
+                TrayAction::Exit => {
+                    self.exiting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        // Closing the window hides it to the tray instead of quitting.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.exiting && self.tray.is_some() && self.manager.settings().minimize_to_tray {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        // Keep polling while hidden so tray and browser requests are handled.
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_external(&ctx);
         let p = theme::palette(ui);
         let all = self.manager.items();
         let visible = self.visible_items(&all);

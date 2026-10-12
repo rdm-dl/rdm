@@ -5,12 +5,14 @@ mod app;
 mod bridge;
 mod dialogs;
 mod theme;
+mod tray;
 mod util;
 
 use eframe::egui;
 use rdm_core::ipc::{self, Client, Request};
 use rdm_core::settings::data_dir;
 use rdm_core::{DownloadRequest, Manager};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 fn main() -> eframe::Result<()> {
@@ -39,12 +41,24 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // IPC requests are relayed to the UI and wake it up (it may be hidden in the tray).
+    let (ipc_tx, mut ipc_rx) = mpsc::unbounded_channel();
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
+    let waker: Arc<OnceLock<egui::Context>> = Arc::new(OnceLock::new());
     let manager = {
         let _guard = rt.enter();
+        let w = waker.clone();
+        tokio::spawn(async move {
+            while let Some(r) = ipc_rx.recv().await {
+                let _ = ui_tx.send(r);
+                if let Some(ctx) = w.get() {
+                    ctx.request_repaint();
+                }
+            }
+        });
         Manager::open(&dir)
     };
-    rt.block_on(ipc::serve(manager.clone(), Some(ui_tx))).expect("ipc server");
+    rt.block_on(ipc::serve(manager.clone(), Some(ipc_tx))).expect("ipc server");
     let dark = manager.settings().dark_mode;
     let initial: Vec<DownloadRequest> = urls.into_iter().map(|url| DownloadRequest { url, ..Default::default() }).collect();
 
@@ -53,7 +67,10 @@ fn main() -> eframe::Result<()> {
             .with_title("RDM — Download Manager")
             .with_inner_size([1100.0, 640.0])
             .with_min_inner_size([720.0, 400.0])
-            .with_visible(!minimized),
+            .with_visible(!minimized)
+            .with_icon(Arc::new(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon256.png")).unwrap_or_default(),
+            )),
         ..Default::default()
     };
     let handle = rt.handle().clone();
@@ -62,8 +79,9 @@ fn main() -> eframe::Result<()> {
         "RDM",
         options,
         Box::new(move |cc| {
+            let _ = waker.set(cc.egui_ctx.clone());
             theme::setup(&cc.egui_ctx, dark);
-            Ok(Box::new(app::App::new(handle, m2, ui_rx, initial)))
+            Ok(Box::new(app::App::new(&cc.egui_ctx, handle, m2, ui_rx, initial)))
         }),
     );
     rt.block_on(manager.shutdown());
