@@ -11,7 +11,7 @@ pub mod settings;
 pub mod storage;
 
 pub use config::EngineConfig;
-pub use download::{Control, Download, DownloadError, DownloadRequest, Progress, Status};
+pub use download::{ChunkView, Control, Download, DownloadError, DownloadHandle, DownloadRequest, ProbeInfo, Progress, Status, probe_info};
 pub use limiter::Limiter;
 pub use manager::{AddOptions, Event, Item, ItemId, ItemState, Manager};
 pub use settings::Settings;

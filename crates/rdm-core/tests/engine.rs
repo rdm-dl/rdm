@@ -12,6 +12,13 @@ fn content(len: usize) -> Arc<Vec<u8>> {
     Arc::new((0..len).map(|i| ((i * 31 + i / 7) % 251) as u8).collect())
 }
 
+struct Guard(Arc<AtomicUsize>);
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct Server {
     port: u16,
     ranged_requests: Arc<AtomicUsize>,
@@ -19,6 +26,12 @@ struct Server {
 
 /// Serve `data`; `ranges` toggles Range support; `rate` = bytes/s per connection.
 async fn serve(data: Arc<Vec<u8>>, ranges: bool, rate: usize) -> Server {
+    serve_limited(data, ranges, rate, usize::MAX).await
+}
+
+/// Like `serve`, but drops connections beyond `max_conns` at once.
+async fn serve_limited(data: Arc<Vec<u8>>, ranges: bool, rate: usize, max_conns: usize) -> Server {
+    let open = Arc::new(AtomicUsize::new(0));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let ranged = Arc::new(AtomicUsize::new(0));
@@ -26,9 +39,16 @@ async fn serve(data: Arc<Vec<u8>>, ranges: bool, rate: usize) -> Server {
     tokio::spawn(async move {
         loop {
             let Ok((mut sock, _)) = listener.accept().await else { return };
+            if open.load(Ordering::SeqCst) >= max_conns {
+                drop(sock);
+                continue;
+            }
+            open.fetch_add(1, Ordering::SeqCst);
             let data = data.clone();
             let ranged = ranged2.clone();
+            let open2 = open.clone();
             tokio::spawn(async move {
+                let _guard = Guard(open2);
                 loop {
                     let mut buf = vec![0u8; 8192];
                     let mut n = 0;
@@ -172,4 +192,16 @@ async fn speed_limit_is_respected() {
     assert_eq!(std::fs::read(&path).unwrap(), *data);
     // 600 KB at 200 KB/s should take roughly 3 s, certainly more than 1.5 s.
     assert!(t.elapsed() > Duration::from_millis(1500), "finished too fast: {:?}", t.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_with_connection_limit_still_completes() {
+    let data = content(2 * 1024 * 1024);
+    let srv = serve_limited(data.clone(), true, 300 * 1024, 2).await;
+    let (out, tmp) = dirs("connlimit");
+    let req = DownloadRequest { url: format!("http://127.0.0.1:{}/data.bin", srv.port), dir: out, ..Default::default() };
+    let cfg = EngineConfig { ramp_interval: Duration::from_millis(300), timeout: Duration::from_secs(5), ..EngineConfig::default() };
+    let dl = Download::start(req, cfg, tmp, Arc::new(Limiter::default()));
+    let path = tokio::time::timeout(Duration::from_secs(60), dl.wait()).await.expect("stalled").unwrap().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), *data);
 }

@@ -400,6 +400,30 @@ impl Manager {
         }
     }
 
+    /// Per-download speed limit; applies immediately if running.
+    pub fn set_item_speed_limit(&self, id: ItemId, limit: Option<u64>) {
+        let mut st = self.inner.state.lock().unwrap();
+        if let Some(r) = st.running.get(&id) {
+            r.handle.set_speed_limit(limit);
+        }
+        if let Some(it) = st.items.get_mut(&id) {
+            it.request.speed_limit = limit;
+            st.dirty = true;
+        }
+    }
+
+    pub fn set_description(&self, id: ItemId, text: String) {
+        let mut st = self.inner.state.lock().unwrap();
+        if let Some(it) = st.items.get_mut(&id) {
+            it.description = text;
+            st.dirty = true;
+        }
+    }
+
+    pub fn global_limiter(&self) -> Arc<Limiter> {
+        self.inner.limiter.clone()
+    }
+
     pub fn set_queue(&self, id: ItemId, queue: u32) {
         let mut st = self.inner.state.lock().unwrap();
         if let Some(it) = st.items.get_mut(&id) {

@@ -116,6 +116,32 @@ impl ChunkMap {
         Some(new_id)
     }
 
+    /// Absorb the chunk after `id` into `id` (its connection never started).
+    /// Returns the absorbed chunk's id.
+    pub fn merge_next(&mut self, id: u32) -> Option<u32> {
+        let idx = self.chunks.iter().position(|c| c.id == id)?;
+        let next = self.chunks.get(idx + 1)?.clone();
+        if next.done > 0 {
+            return None;
+        }
+        self.chunks[idx].end = next.end;
+        self.chunks.remove(idx + 1);
+        Some(next.id)
+    }
+
+    /// Give chunk `id` (no data yet) back to its left neighbour.
+    pub fn merge_into_prev(&mut self, id: u32) -> Option<u32> {
+        let idx = self.chunks.iter().position(|c| c.id == id)?;
+        if idx == 0 || self.chunks[idx].done > 0 {
+            return None;
+        }
+        let end = self.chunks[idx].end;
+        let prev = self.chunks[idx - 1].id;
+        self.chunks[idx - 1].end = end;
+        self.chunks.remove(idx);
+        Some(prev)
+    }
+
     /// Pick the best chunk and split it for a new connection, if worthwhile.
     pub fn split_for_new_connection(&mut self, speeds: &HashMap<u32, u64>) -> Option<u32> {
         if !self.need_new_connection(speeds) {
@@ -173,6 +199,23 @@ mod tests {
         assert!(m.split(0).is_some());
         let mut tiny = ChunkMap::new(20_000);
         assert!(tiny.split(0).is_none());
+    }
+
+    #[test]
+    fn merge_next_takes_unstarted_chunk() {
+        let mut m = ChunkMap::new(1_000_000);
+        let b = m.split(0).unwrap();
+        assert_eq!(m.merge_next(0), Some(b));
+        assert_eq!(m.chunks.len(), 1);
+        assert_eq!(m.chunks[0].end, 1_000_000);
+    }
+
+    #[test]
+    fn merge_into_prev_returns_work() {
+        let mut m = ChunkMap::new(1_000_000);
+        let b = m.split(0).unwrap();
+        assert_eq!(m.merge_into_prev(b), Some(0));
+        assert_eq!(m.chunks[0].end, 1_000_000);
     }
 
     #[test]

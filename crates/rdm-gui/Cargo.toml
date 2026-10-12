@@ -1,0 +1,25 @@
+[package]
+name = "rdm-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RDM desktop app"
+
+[[bin]]
+name = "rdm-gui"
+path = "src/main.rs"
+
+[dependencies]
+rdm-core = { path = "../rdm-core" }
+tokio.workspace = true
+chrono.workspace = true
+url.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = "0.36.2"
+egui_extras = "0.36.2"
+rfd = "0.17.2"
+arboard = "3.6.1"
+open = "5.4.4"
+egui-phosphor = { version = "0.14.0", features = ["fill", "bold"] }

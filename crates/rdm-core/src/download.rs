@@ -185,6 +185,10 @@ struct Shared {
     verified: HashSet<u32>,
     corrupted: bool,
     single_connection: bool,
+    /// Chunks that have a connection task (started or about to start).
+    assigned: HashSet<u32>,
+    /// Learned limit on parallel connections (server refused more).
+    conn_cap: Option<usize>,
 }
 
 impl Shared {
@@ -225,6 +229,7 @@ enum WorkerExit {
 #[derive(Clone)]
 pub struct DownloadHandle {
     control: Arc<watch::Sender<Control>>,
+    limiter: Arc<Limiter>,
 }
 
 impl DownloadHandle {
@@ -234,11 +239,16 @@ impl DownloadHandle {
     pub fn cancel(&self) {
         let _ = self.control.send(Control::Cancel);
     }
+    /// Change this download's own speed limit while it runs.
+    pub fn set_speed_limit(&self, limit: Option<u64>) {
+        self.limiter.set_limit(limit);
+    }
 }
 
 pub struct Download {
     pub progress: watch::Receiver<Progress>,
     control: Arc<watch::Sender<Control>>,
+    limiter: Arc<Limiter>,
     task: tokio::task::JoinHandle<Result<Option<PathBuf>>>,
 }
 
@@ -248,8 +258,9 @@ impl Download {
         let name = req.file_name.clone().unwrap_or_default();
         let (ptx, prx) = watch::channel(Progress::new(name));
         let (ctx_tx, crx) = watch::channel(Control::Run);
-        let task = tokio::spawn(run(req, cfg, temp_dir, global_limiter, ptx, crx));
-        Self { progress: prx, control: Arc::new(ctx_tx), task }
+        let limiter = Arc::new(Limiter::new(req.speed_limit));
+        let task = tokio::spawn(run(req, cfg, temp_dir, global_limiter, limiter.clone(), ptx, crx));
+        Self { progress: prx, control: Arc::new(ctx_tx), limiter, task }
     }
 
     pub fn pause(&self) {
@@ -261,7 +272,7 @@ impl Download {
     }
 
     pub fn handle(&self) -> DownloadHandle {
-        DownloadHandle { control: self.control.clone() }
+        DownloadHandle { control: self.control.clone(), limiter: self.limiter.clone() }
     }
 
     /// Wait for the download to finish. `Ok(Some(path))` when complete, `Ok(None)` when paused.
@@ -440,8 +451,20 @@ async fn pump(ctx: &Ctx, id: u32, resp: Response, control: &watch::Receiver<Cont
 }
 
 /// One connection: download its chunk (retrying), then take over more work.
-async fn worker(ctx: Arc<Ctx>, mut id: u32, mut first: Option<Response>, control: watch::Receiver<Control>) -> Result<WorkerExit> {
+async fn worker(ctx: Arc<Ctx>, id: u32, first: Option<Response>, control: watch::Receiver<Control>) -> Result<WorkerExit> {
+    let mut current = id;
+    let r = worker_inner(&ctx, &mut current, first, control).await;
+    let mut sh = ctx.shared.lock().unwrap();
+    sh.assigned.remove(&current);
+    sh.active.remove(&current);
+    r
+}
+
+async fn worker_inner(ctx: &Arc<Ctx>, id_ref: &mut u32, mut first: Option<Response>, control: watch::Receiver<Control>) -> Result<WorkerExit> {
+    let ctx = ctx.clone();
+    let mut id = *id_ref;
     loop {
+        *id_ref = id;
         ctx.shared.lock().unwrap().active.insert(id);
         let mut failures = 0u32;
         loop {
@@ -485,6 +508,20 @@ async fn worker(ctx: Arc<Ctx>, mut id: u32, mut first: Option<Response>, control
                 Err(e) => {
                     failures += 1;
                     tracing::debug!("chunk {id}: {e} (attempt {failures})");
+                    // The server refuses an extra connection while others work: give the
+                    // part back and stop opening more connections for this download.
+                    if failures >= 3 {
+                        let mut sh = ctx.shared.lock().unwrap();
+                        let fresh = sh.map.get(id).is_some_and(|c| c.done == 0);
+                        let others = sh.active.iter().filter(|a| **a != id).count();
+                        if fresh && others > 0 && sh.map.merge_into_prev(id).is_some() {
+                            sh.conn_cap = Some(others.max(1));
+                            sh.active.remove(&id);
+                            sh.assigned.remove(&id);
+                            tracing::info!("server refused another connection; limiting to {others}");
+                            return Ok(WorkerExit::Done);
+                        }
+                    }
                     if ctx.cfg.max_retries > 0 && failures > ctx.cfg.max_retries {
                         ctx.shared.lock().unwrap().active.remove(&id);
                         return Err(DownloadError::Retries(id, e.to_string()));
@@ -512,6 +549,18 @@ async fn worker(ctx: Arc<Ctx>, mut id: u32, mut first: Option<Response>, control
             }
         }
 
+        // If the next part's connection hasn't started, take that part over directly.
+        {
+            let mut sh = ctx.shared.lock().unwrap();
+            let next = sh.map.chunks.iter().position(|c| c.id == id).and_then(|i| sh.map.chunks.get(i + 1)).map(|c| (c.id, c.done));
+            if let Some((nid, 0)) = next {
+                if !sh.assigned.contains(&nid) && sh.map.merge_next(id).is_some() {
+                    sh.verified.remove(&id);
+                    continue;
+                }
+            }
+        }
+
         // Connection reuse: take over half of the chunk with the most work left.
         let next = {
             let mut sh = ctx.shared.lock().unwrap();
@@ -525,7 +574,12 @@ async fn worker(ctx: Arc<Ctx>, mut id: u32, mut first: Option<Response>, control
             }
         };
         match next {
-            Some(n) => id = n,
+            Some(n) => {
+                let mut sh = ctx.shared.lock().unwrap();
+                sh.assigned.remove(&id);
+                sh.assigned.insert(n);
+                id = n;
+            }
             None => return Ok(WorkerExit::Done),
         }
     }
@@ -557,10 +611,11 @@ async fn run(
     cfg: EngineConfig,
     temp_dir: PathBuf,
     global_limiter: Arc<Limiter>,
+    limiter: Arc<Limiter>,
     progress: watch::Sender<Progress>,
     mut control: watch::Receiver<Control>,
 ) -> Result<Option<PathBuf>> {
-    let result = run_inner(&req, cfg, temp_dir, global_limiter, &progress, &mut control).await;
+    let result = run_inner(&req, cfg, temp_dir, global_limiter, limiter, &progress, &mut control).await;
     progress.send_modify(|p| match &result {
         Ok(Some(path)) => {
             p.status = Status::Complete;
@@ -587,6 +642,7 @@ async fn run_inner(
     mut cfg: EngineConfig,
     temp_dir: PathBuf,
     global_limiter: Arc<Limiter>,
+    limiter: Arc<Limiter>,
     progress: &watch::Sender<Progress>,
     control: &mut watch::Receiver<Control>,
 ) -> Result<Option<PathBuf>> {
@@ -669,8 +725,10 @@ async fn run_inner(
             verified: HashSet::new(),
             corrupted: false,
             single_connection: single || !info.resumable,
+            assigned: HashSet::new(),
+            conn_cap: None,
         }),
-        limiter: Arc::new(Limiter::new(req.speed_limit)),
+        limiter,
         global_limiter,
         validator,
     });
@@ -685,6 +743,7 @@ async fn run_inner(
     let mut workers: JoinSet<(u32, Result<WorkerExit>)> = JoinSet::new();
     let worker_control = control.clone();
     let spawn = |workers: &mut JoinSet<(u32, Result<WorkerExit>)>, id: u32, first: Option<Response>| {
+        ctx.shared.lock().unwrap().assigned.insert(id);
         let c = ctx.clone();
         let ctl = worker_control.clone();
         workers.spawn(async move { (id, worker(c, id, first, ctl).await) });
@@ -730,6 +789,7 @@ async fn run_inner(
     let mut ui_tick = tokio::time::interval(cfg.ui_interval);
     let mut last_save = Instant::now();
     let mut last_ramp = Instant::now();
+    let mut last_orphan = Instant::now();
     let mut speed_t = Instant::now();
     let mut speed_bytes = ctx.shared.lock().unwrap().map.downloaded();
     let mut speed = 0.0f64;
@@ -795,12 +855,24 @@ async fn run_inner(
                     last_save = Instant::now();
                 }
                 // Ramp-up: double the connection count while every connection is productive.
-                let single_now = ctx.shared.lock().unwrap().single_connection;
+                let (single_now, cap, orphans, assigned) = {
+                    let sh = ctx.shared.lock().unwrap();
+                    let cap = sh.conn_cap.unwrap_or(cfg.max_connections).min(cfg.max_connections);
+                    let orphans: Vec<u32> = sh.map.chunks.iter().filter(|c| !c.is_complete() && !sh.assigned.contains(&c.id)).map(|c| c.id).collect();
+                    (sh.single_connection, cap, orphans, sh.assigned.len())
+                };
+                // Parts without a connection (e.g. handed back) get one when there is room.
+                if !restart_single && !orphans.is_empty() && last_orphan.elapsed() >= Duration::from_secs(2) {
+                    for oid in orphans.into_iter().take(cap.saturating_sub(assigned)) {
+                        spawn(&mut workers, oid, None);
+                    }
+                    last_orphan = Instant::now();
+                }
                 let near_limit = ctx.limiter.near_limit(speed) || ctx.global_limiter.near_limit(speed);
                 if !single_now && !restart_single && all_receiving && !near_limit
-                    && conns < cfg.max_connections && last_ramp.elapsed() >= cfg.ramp_interval
+                    && conns < cap && last_ramp.elapsed() >= cfg.ramp_interval
                 {
-                    let target = (conns * 2).min(cfg.max_connections);
+                    let target = (conns * 2).min(cap);
                     for _ in conns..target {
                         let id = {
                             let mut sh = ctx.shared.lock().unwrap();
@@ -914,4 +986,35 @@ async fn fresh(
     };
     let _ = tmp;
     Ok((map, info, Some(r), 0, !resumable))
+}
+
+/// What a URL points to, learned without downloading the body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeInfo {
+    pub file_name: String,
+    pub total: Option<u64>,
+    pub content_type: Option<String>,
+    pub resumable: bool,
+    pub final_url: String,
+}
+
+/// Request the URL, read only the headers, and report name/size/range support.
+pub async fn probe_info(req: &DownloadRequest, cfg: &EngineConfig) -> Result<ProbeInfo> {
+    let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
+    let client = build_client(cfg, req)?;
+    let r = probe(&client, &url, req, Some(0), None).await?;
+    let si = ServerInfo::from_response(&r);
+    drop(r);
+    let final_url = si.final_url.clone().unwrap_or(url);
+    let file_name = match &req.file_name {
+        Some(n) => naming::sanitize(n),
+        None => naming::choose(&final_url, si.disposition.as_deref(), si.content_type.as_deref()),
+    };
+    Ok(ProbeInfo {
+        file_name,
+        total: si.total,
+        content_type: si.content_type,
+        resumable: si.accept_ranges && si.total.is_some(),
+        final_url: final_url.to_string(),
+    })
 }
