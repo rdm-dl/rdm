@@ -69,12 +69,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", default="")
     ap.add_argument("--name", default="")
+    ap.add_argument("--bin-dir", default="")
     a = ap.parse_args()
     ver = version()
     system = platform.system().lower()
     name = a.name or {"windows": "windows-x64", "darwin": "macos", "linux": "linux-x64"}.get(system, system)
     exe = ".exe" if system == "windows" else ""
-    bin_dir = os.path.join(ROOT, "target", a.target, "release") if a.target else os.path.join(ROOT, "target", "release")
+    bin_dir = a.bin_dir or (os.path.join(ROOT, "target", a.target, "release") if a.target else os.path.join(ROOT, "target", "release"))
     pkg = f"RDM-{ver}-{name}"
     out = os.path.join(ROOT, "dist", pkg)
     shutil.rmtree(out, ignore_errors=True)

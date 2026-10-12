@@ -1,9 +1,12 @@
 //! System tray icon (Windows and macOS).
 
 use eframe::egui;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
+#[cfg(not(target_os = "linux"))]
+use std::sync::mpsc::channel;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub enum TrayAction {
     Show,
     NewDownload,
