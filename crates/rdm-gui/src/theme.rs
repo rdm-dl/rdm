@@ -209,6 +209,31 @@ pub fn button(ui: &mut Ui, kind: Kind, icon_str: &str, label: &str, enabled: boo
     if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
+/// Full-width primary call-to-action (sidebar "New download"): centred icon + label, a
+/// soft accent glow and a subtle top highlight, matching the logo tile.
+pub fn cta_button(ui: &mut Ui, icon_str: &str, label: &str) -> Response {
+    let p = palette(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hovered = resp.hovered();
+        let pressed = resp.is_pointer_button_down_on();
+        let radius = CornerRadius::same(11);
+        let fill = if pressed { p.accent.gamma_multiply(0.85) } else if hovered { lighten(p.accent, 0.10) } else { p.accent };
+        let glow = if hovered { 0.5 } else { 0.32 };
+        ui.painter().add(egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: p.accent.gamma_multiply(glow) }.as_shape(rect, radius));
+        ui.painter().rect_filled(rect, radius, fill);
+        let top = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.center().y));
+        ui.painter().rect_filled(top, CornerRadius { nw: 11, ne: 11, sw: 0, se: 0 }, Color32::from_white_alpha(22));
+        let icon_g = ui.painter().layout_no_wrap(icon_str.to_string(), icon_font(17.0), Color32::WHITE);
+        let label_g = ui.painter().layout_no_wrap(label.to_string(), semibold(14.0), Color32::WHITE);
+        let w = icon_g.size().x + 8.0 + label_g.size().x;
+        let x = rect.center().x - w / 2.0;
+        ui.painter().galley(pos2(x, rect.center().y - icon_g.size().y / 2.0), icon_g, Color32::WHITE);
+        ui.painter().galley(pos2(x + w - label_g.size().x, rect.center().y - label_g.size().y / 2.0), label_g, Color32::WHITE);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Small square icon-only button for row actions.
 pub fn icon_button(ui: &mut Ui, icon_str: &str, tooltip: &str) -> Response {
     let p = palette(ui);

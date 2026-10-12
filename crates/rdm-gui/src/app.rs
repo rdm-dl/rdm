@@ -219,32 +219,34 @@ impl App {
 
     fn sidebar(&mut self, ui: &mut egui::Ui, items: &[Item]) {
         let p = theme::palette(ui);
-        ui.add_space(14.0);
+        ui.add_space(16.0);
+        // Brand: glowing logo tile with a soft highlight, name and tagline centred on it.
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+        let logo = Rect::from_min_size(pos2(row.left() + 6.0, row.center().y - 21.0), vec2(42.0, 42.0));
+        let radius = CornerRadius::same(13);
+        let painter = ui.painter();
+        painter.add(egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: p.accent.gamma_multiply(0.45) }.as_shape(logo, radius));
+        painter.rect_filled(logo, radius, p.accent);
+        let top = Rect::from_min_max(logo.min, pos2(logo.max.x, logo.center().y));
+        painter.rect_filled(top, CornerRadius { nw: 13, ne: 13, sw: 0, se: 0 }, Color32::from_white_alpha(30));
+        painter.rect_stroke(logo, radius, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Inside);
+        painter.text(logo.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, icon::DOWNLOAD_SIMPLE, theme::icon_font(22.0), Color32::WHITE);
+        let tx = logo.right() + 13.0;
+        painter.text(pos2(tx, row.center().y + 1.0), Align2::LEFT_BOTTOM, "RDM", theme::semibold(20.0), p.text);
+        painter.text(pos2(tx + 1.0, row.center().y + 4.0), Align2::LEFT_TOP, "Download Manager", FontId::proportional(11.5), p.text_dim);
+        ui.add_space(18.0);
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let (r, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
-            ui.painter().rect_filled(r, CornerRadius::same(10), p.accent);
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, icon::DOWNLOAD_SIMPLE, theme::icon_font(19.0), Color32::WHITE);
             ui.add_space(4.0);
-            ui.vertical(|ui| {
-                ui.add_space(1.0);
-                ui.label(RichText::new("RDM").font(theme::semibold(16.0)));
-                ui.label(RichText::new("Download Manager").size(11.0).color(p.text_dim));
-            });
-        });
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            let w = ui.available_width() - 8.0;
+            let w = ui.available_width() - 6.0;
             let resp = ui.scope(|ui| {
-                ui.set_width(w);
-                theme::button(ui, Kind::Primary, icon::PLUS, "New download", true)
+                ui.set_max_width(w);
+                theme::cta_button(ui, icon::PLUS, "New download")
             });
             if resp.inner.clicked() {
                 self.new_download();
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(12.0);
 
         // Speed card pinned to the bottom.
         let s = self.manager.settings();
