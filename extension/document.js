@@ -15,6 +15,7 @@
   function report(url, type, size) {
     try {
       if (!url || seen.has(url) || !/^https?:/i.test(url)) return;
+      if (/\.googlevideo\.com\//i.test(url)) return; // handled from the player data
       const t = (type || "").split(";")[0].trim();
       if (SEGMENT_RE.test(url) && !/mpegurl|dash/i.test(t)) return;
       if (!URL_RE.test(url) && !TYPE_RE.test(t)) return;
@@ -31,6 +32,61 @@
     }
   }
 
+  // ---- YouTube: the player's own data (formats, qualities, title).
+  const YT = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtube\.googleapis\.com)$/.test(location.hostname);
+  const PLAYER_API = /\/youtubei\/v1\/player\b/;
+  let lastYt = "";
+
+  function ytReport(resp) {
+    try {
+      if (!resp || !resp.streamingData || !resp.videoDetails) return;
+      const sd = resp.streamingData;
+      const vd = resp.videoDetails;
+      const fmt = (f) => ({
+        itag: f.itag,
+        url: f.url || "",
+        cipher: !!(f.signatureCipher || f.cipher),
+        mime: f.mimeType || "",
+        w: f.width || 0,
+        h: f.height || 0,
+        fps: f.fps || 0,
+        label: f.qualityLabel || "",
+        bitrate: f.bitrate || 0,
+        clen: +f.contentLength || 0,
+        drm: !!(f.drmFamilies && f.drmFamilies.length),
+        audioDefault: f.audioTrack ? !!f.audioTrack.audioIsDefault : true,
+        audioName: f.audioTrack ? f.audioTrack.displayName || "" : "",
+      });
+      const data = {
+        videoId: vd.videoId,
+        title: vd.title || document.title,
+        duration: +vd.lengthSeconds || 0,
+        live: !!vd.isLive,
+        formats: [...(sd.formats || []).map(fmt), ...(sd.adaptiveFormats || []).map(fmt)],
+        hls: sd.hlsManifestUrl || "",
+        sabr: !!sd.serverAbrStreamingUrl,
+      };
+      const key = data.videoId + ":" + data.formats.length + ":" + data.formats.filter((f) => f.url).length;
+      if (key === lastYt) return;
+      lastYt = key;
+      window.postMessage({ __rdm: MAGIC, yt: data }, "*");
+    } catch {}
+  }
+
+  if (YT) {
+    const poll = () => {
+      try {
+        const p = document.getElementById("movie_player");
+        const resp = (p && typeof p.getPlayerResponse === "function" && p.getPlayerResponse()) || window.ytInitialPlayerResponse;
+        ytReport(resp);
+      } catch {}
+    };
+    document.addEventListener("yt-navigate-finish", () => setTimeout(poll, 500));
+    document.addEventListener("yt-page-data-updated", () => setTimeout(poll, 500));
+    window.addEventListener("load", poll);
+    setInterval(poll, 2000);
+  }
+
   const origFetch = window.fetch;
   if (typeof origFetch === "function") {
     const hooked = function (input, init) {
@@ -40,6 +96,10 @@
         p.then(
           (r) => {
             try {
+              if (YT && PLAYER_API.test(r.url || url)) {
+                r.clone().json().then(ytReport, () => {});
+                return;
+              }
               report(r.url || url, r.headers.get("content-type"), +r.headers.get("content-length") || 0);
             } catch {}
           },
@@ -62,7 +122,13 @@
         const target = abs(url);
         this.addEventListener("load", () => {
           try {
-            report(this.responseURL || target, this.getResponseHeader("content-type"), +this.getResponseHeader("content-length") || 0);
+            const u = this.responseURL || target;
+            if (YT && PLAYER_API.test(u)) {
+              const body = this.responseType === "json" ? this.response : this.responseType === "" || this.responseType === "text" ? JSON.parse(this.responseText) : null;
+              ytReport(body);
+              return;
+            }
+            report(u, this.getResponseHeader("content-type"), +this.getResponseHeader("content-length") || 0);
           } catch {}
         });
       } catch {}

@@ -652,6 +652,9 @@ async fn run_inner(
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
     let client = build_client(&cfg, req)?;
     let tmp = TempDir::new(&temp_dir)?;
+    if crate::pair::audio_url(&req.url).is_some() {
+        return crate::pair::run(req, &cfg, tmp, global_limiter, limiter, progress, control).await;
+    }
     if url.scheme() == "ftp" {
         return crate::ftp::run(req, &cfg, tmp, global_limiter, limiter, progress, control).await;
     }

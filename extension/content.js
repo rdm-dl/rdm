@@ -281,10 +281,26 @@
     menuOpen = true;
     menu.hidden = false;
     menu.replaceChildren(el("div", "note", "Looking for media…"));
-    const state = (await send({ type: "page-media" })) || { media: [], connected: false };
+    const state = (await send({ type: "page-media", pageUrl: location.href })) || { media: [], connected: false };
     if (!menuOpen) return;
     menu.replaceChildren();
     const items = state.media || [];
+    if (!state.connected) menu.append(el("div", "note bad", "RDM is not running. Start the app, then try again."));
+    // Site player streams (e.g. YouTube): one entry per quality, video + audio joined by RDM.
+    const site = items.filter((m) => m.kind === "yt");
+    const siteNotes = items.filter((m) => m.kind === "yt-note");
+    if (site.length || siteNotes.length) {
+      const t = (site[0] || siteNotes[0]).title;
+      menu.append(el("div", "head", t ? `Video · ${t}` : "Video"));
+      for (const s of site) {
+        const meta = [s.container, s.fps > 30 ? `${s.fps}fps` : "", fmtSize(s.size), fmtDur(s.duration)].filter(Boolean).join(" · ");
+        menu.append(entry(s.label, meta, () => send({ type: "download-media", kind: "yt", url: s.video, audio: s.audio, title: s.title, ext: s.ext })));
+      }
+      for (const n of siteNotes) menu.append(el("div", "note", n.text));
+    }
+    const rest = items.filter((m) => m.kind !== "yt" && m.kind !== "yt-note");
+    items.length = 0;
+    items.push(...rest);
     const direct = current && /^https?:/i.test(current.currentSrc || "") ? current.currentSrc.split("#")[0] : "";
     if (direct && !items.some((m) => m.url === direct)) {
       items.push({ url: direct, kind: "file", type: isAudio(current) ? "audio" : "video", size: 0 });
@@ -292,9 +308,9 @@
     const streams = items.filter((m) => m.kind === "stream");
     const files = items.filter((m) => m.kind === "file");
     const subs = items.filter((m) => m.kind === "subtitle");
-    if (!state.connected) menu.append(el("div", "note bad", "RDM is not running. Start the app, then try again."));
     const title = document.title;
     if (streams.length) {
+      if (site.length) menu.append(el("div", "sep"));
       menu.append(el("div", "head", "Streams"));
       for (const s of streams) {
         const kind = s.type.startsWith("DASH") ? "DASH" : "HLS";
@@ -322,7 +338,7 @@
         menu.append(entry(tagOf(f), nameOf(f.url), () => send({ type: "download-media", url: f.url, kind: "subtitle", title })));
       }
     }
-    if (!streams.length && !files.length && !subs.length) {
+    if (!site.length && !siteNotes.length && !streams.length && !files.length && !subs.length) {
       menu.append(el("div", "note", "Nothing downloadable detected yet. Let it play for a few seconds, then click again. If you want another quality, pick it in the player first."));
     }
     menu.append(el("div", "sep"));
@@ -411,7 +427,12 @@
   // Media requests seen inside the page (document.js).
   window.addEventListener("message", (e) => {
     const d = e.data;
-    if (e.source !== window || !d || d.__rdm !== MAGIC || typeof d.url !== "string") return;
+    if (e.source !== window || !d || d.__rdm !== MAGIC) return;
+    if (d.yt && typeof d.yt === "object") {
+      send({ type: "yt-player", data: d.yt });
+      return;
+    }
+    if (typeof d.url !== "string") return;
     send({ type: "page-request", url: d.url, mime: String(d.type || ""), size: +d.size || 0 });
   });
 

@@ -24,22 +24,42 @@ fn main() -> eframe::Result<()> {
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
 
-    // Single instance: hand the URLs to the running app and quit.
-    let forwarded = rt.block_on(async {
-        let Ok(mut c) = Client::connect(&dir).await else { return false };
-        if c.call(Request::Ping).await.is_err() {
-            return false;
-        }
-        for u in &urls {
-            let _ = c
-                .call(Request::Add { request: DownloadRequest { url: u.clone(), ..Default::default() }, start_now: false, interactive: true })
-                .await;
-        }
-        let _ = c.call(Request::Show).await;
-        true
-    });
-    if forwarded {
+    // Single instance: hand the URLs to the running app and quit. The lock file closes the
+    // window where several launches (e.g. parallel browser requests) start at once.
+    let forward = |show: bool| {
+        rt.block_on(async {
+            let Ok(mut c) = Client::connect(&dir).await else { return false };
+            if c.call(Request::Ping).await.is_err() {
+                return false;
+            }
+            for u in &urls {
+                let _ = c
+                    .call(Request::Add { request: DownloadRequest { url: u.clone(), ..Default::default() }, start_now: false, interactive: true })
+                    .await;
+            }
+            if show {
+                let _ = c.call(Request::Show).await;
+            }
+            true
+        })
+    };
+    let show = !minimized || !urls.is_empty();
+    if forward(show) {
         return Ok(());
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let instance_lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("app.lock"));
+    if let Ok(f) = &instance_lock {
+        if f.try_lock().is_err() {
+            // Another instance holds the lock and is still starting: wait for it, then forward.
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if forward(show) {
+                    break;
+                }
+            }
+            return Ok(());
+        }
     }
 
     // IPC requests are relayed to the UI and wake it up (it may be hidden in the tray).

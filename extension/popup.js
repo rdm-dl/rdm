@@ -39,7 +39,7 @@ function button(text, onClick) {
 
 async function init() {
   const [tab] = await api.tabs.query({ active: true, currentWindow: true });
-  const state = await api.runtime.sendMessage({ type: "state", tabId: tab?.id });
+  const state = await api.runtime.sendMessage({ type: "state", tabId: tab?.id, pageUrl: tab?.url });
   const status = document.getElementById("status");
   status.textContent = state.connected ? "Connected to RDM" : "RDM not reachable — open the app";
   status.className = "status " + (state.connected ? "ok" : "bad");
@@ -77,6 +77,26 @@ async function init() {
   document.getElementById("empty").hidden = state.media.length > 0;
   for (const m of state.media) {
     const li = document.createElement("li");
+    if (m.kind === "yt-note") {
+      li.className = "note";
+      li.textContent = m.text;
+      list.append(li);
+      continue;
+    }
+    if (m.kind === "yt") {
+      const info = document.createElement("div");
+      info.className = "info";
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = `${m.label} · ${m.title}`;
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = [m.container, m.fps > 30 ? `${m.fps}fps` : "", fmtSize(m.size), fmtDur(m.duration)].filter(Boolean).join(" · ");
+      info.append(name, meta);
+      li.append(info, button("Download", () => api.runtime.sendMessage({ type: "download-media", tabId: tab?.id, kind: "yt", url: m.video, audio: m.audio, title: m.title, ext: m.ext })));
+      list.append(li);
+      continue;
+    }
     const info = document.createElement("div");
     info.className = "info";
     const name = document.createElement("div");

@@ -196,7 +196,6 @@ fn ffmpeg_available() -> bool {
     std::process::Command::new("ffmpeg").arg("-version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
-/// Download an HLS stream. Returns the final file path, or `None` if paused.
 /// An `EXT-X-MEDIA` audio rendition with its own playlist.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioRendition {
@@ -259,6 +258,7 @@ fn segment_ext(pl: &MediaPlaylist) -> &'static str {
     }
 }
 
+/// Download an HLS stream. Returns the final file path, or `None` if paused.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     req: &DownloadRequest,

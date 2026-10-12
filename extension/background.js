@@ -247,7 +247,11 @@ function loadState() {
   if (!loaded) {
     loaded = (async () => {
       try {
-        const s = await api.storage.session.get("media");
+        const s = await api.storage.session.get(["media", "yt"]);
+        for (const [tab, list] of Object.entries(s.yt || {})) {
+          const videos = ytVideos(+tab);
+          for (const v of list) if (!videos.has(v.videoId)) videos.set(v.videoId, v);
+        }
         for (const [tab, list] of Object.entries(s.media || {})) {
           const id = +tab;
           media.set(id, new Map([...(media.get(id) || new Map()), ...list.items.map((i) => [i.url, i])]));
@@ -264,8 +268,10 @@ function saveState() {
   saveTimer = setTimeout(() => {
     const out = {};
     for (const [tab, byUrl] of media) out[tab] = { items: [...byUrl.values()], kids: [...(children.get(tab) || [])] };
+    const ytOut = {};
+    for (const [tab, videos] of yt) ytOut[tab] = [...videos.values()].sort((a, b) => b.found - a.found).slice(0, 5);
     try {
-      api.storage.session.set({ media: out });
+      api.storage.session.set({ media: out, yt: ytOut });
     } catch {}
   }, 300);
 }
@@ -273,6 +279,8 @@ function saveState() {
 function forgetTab(tabId) {
   media.delete(tabId);
   children.delete(tabId);
+  yt.delete(tabId);
+  ytPending.delete(tabId);
   saveState();
 }
 
@@ -337,7 +345,7 @@ async function inspectManifest(url, dash) {
 }
 
 function notifyTab(tabId) {
-  const n = media.get(tabId)?.size || 0;
+  const n = mediaCount(tabId);
   try {
     api.tabs.sendMessage(tabId, { type: "rdm-media", count: n }, () => void api.runtime.lastError);
   } catch {}
@@ -355,6 +363,7 @@ function addMedia(tabId, info) {
 // Classify one response (from webRequest or from the page hooks) and remember it.
 async function consider(tabId, url, type, size, total) {
   if (tabId == null || tabId < 0) return;
+  if (/\.googlevideo\.com\//i.test(url)) return;
   await loadState();
   const key = url.split("#")[0];
   if (media.get(tabId)?.has(key) || children.get(tabId)?.has(key)) return;
@@ -423,16 +432,21 @@ api.tabs.onRemoved.addListener(async (tabId) => {
 
 function updateBadge(tabId) {
   if (typeof tabId !== "number") return;
-  const n = media.get(tabId)?.size || 0;
+  const n = mediaCount(tabId);
   try {
     api.action.setBadgeText({ tabId, text: n ? String(n) : "" });
     api.action.setBadgeBackgroundColor({ tabId, color: "#5b7cff" });
   } catch {}
 }
 
-function mediaList(tabId) {
+function mediaList(tabId, pageUrl) {
   const rank = { stream: 0, file: 1, subtitle: 2 };
-  return [...(media.get(tabId)?.values() || [])].sort((a, b) => rank[a.kind] - rank[b.kind] || b.found - a.found);
+  const own = [...(media.get(tabId)?.values() || [])].sort((a, b) => rank[a.kind] - rank[b.kind] || b.found - a.found);
+  return [...ytList(tabId, pageUrl), ...own];
+}
+
+function mediaCount(tabId) {
+  return (media.get(tabId)?.size || 0) + ytList(tabId).filter((e) => e.kind === "yt").length;
 }
 
 function safeName(title, ext) {
@@ -440,7 +454,18 @@ function safeName(title, ext) {
   return t ? `${t}.${ext}` : undefined;
 }
 
+function pairUrl(video, audio) {
+  return `${video.split("#")[0]}#rdm-audio=${encodeURIComponent(audio)}`;
+}
+
 async function downloadMedia(msg, tab) {
+  if (msg.kind === "yt") {
+    const url = msg.audio ? pairUrl(msg.url, msg.audio) : msg.url;
+    return send({
+      type: "download",
+      ...(await payload(url, { referrer: tab?.url || "", filename: safeName(msg.title || tab?.title, msg.ext || "mp4") })),
+    });
+  }
   const quality = msg.quality ? `#rdm-quality=${msg.quality}` : "";
   const isStream = /\.(m3u8|mpd)(\?|$)/i.test(msg.url) || msg.kind === "stream";
   const title = msg.title || tab?.title;
@@ -451,6 +476,211 @@ async function downloadMedia(msg, tab) {
     type: "download",
     ...(await payload(msg.url + quality, { referrer: msg.referrer || tab?.url || "", filename })),
   });
+}
+
+// ------------------------------------------------------------ site players (YouTube)
+//
+// The page script (document.js) reports the player's own data: every format with its
+// itag, size, quality and (when the player has it) its URL. Stream URLs need the player's
+// own unlocking (the `n` / signature parameters); instead of re-implementing that, the
+// requests the player itself makes to /videoplayback are recorded here: they carry the
+// unlocked parameters. From one unlocked request the shared `n` value maps every other
+// format URL of the same response; signature-protected formats are usable once the
+// player has requested them (switch quality in the player to add more).
+
+const yt = new Map(); // tabId -> Map(videoId -> info)
+const YT_DROP = ["range", "rn", "rbuf", "alr", "ump", "srfvp", "cpn"];
+
+function ytVideos(tabId) {
+  let m = yt.get(tabId);
+  if (!m) yt.set(tabId, (m = new Map()));
+  return m;
+}
+
+function cleanStreamUrl(u) {
+  try {
+    const url = new URL(u);
+    for (const k of YT_DROP) url.searchParams.delete(k);
+    url.hash = "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function ytOnPlayer(tabId, data) {
+  if (tabId == null || tabId < 0 || !data || !data.videoId || !Array.isArray(data.formats)) return;
+  const videos = ytVideos(tabId);
+  const prev = videos.get(data.videoId);
+  const info = {
+    ...data,
+    observed: prev ? prev.observed : {}, // itag -> unlocked URL
+    nMap: prev ? prev.nMap : {}, // original n -> unlocked n
+    pot: prev ? prev.pot : "",
+    sabrSeen: prev ? prev.sabrSeen : false,
+    found: Date.now(),
+  };
+  videos.set(data.videoId, info);
+  for (const r of ytPending.get(tabId) || []) ytOnRequest(r, true);
+  saveState();
+  if (data.hls && !data.live) consider(tabId, data.hls, "application/x-mpegurl", 0, 0);
+  updateBadge(tabId);
+  notifyTab(tabId);
+}
+
+const ytPending = new Map(); // tabId -> recent requests not matched yet
+
+function ytOnRequest(d, replay) {
+  if (d.tabId < 0) return;
+  const videos = yt.get(d.tabId);
+  let u;
+  try {
+    u = new URL(d.url);
+  } catch {
+    return;
+  }
+  const q = u.searchParams;
+  const itag = +q.get("itag");
+  const clen = +q.get("clen") || 0;
+  // Which video: match the content length against the formats the player listed.
+  let target = null;
+  if (videos) {
+    for (const v of videos.values()) {
+      if (v.formats.some((f) => f.itag === itag && (!clen || !f.clen || f.clen === clen))) {
+        if (!target || v.found > target.found) target = v;
+      }
+    }
+  }
+  if (!target) {
+    if (!replay) {
+      const list = ytPending.get(d.tabId) || [];
+      list.push({ tabId: d.tabId, url: d.url, method: d.method, t: Date.now() });
+      ytPending.set(d.tabId, list.filter((x) => Date.now() - x.t < 60000).slice(-60));
+    }
+    return;
+  }
+  if (d.method !== "GET" || q.get("sabr") === "1" || !itag) {
+    target.sabrSeen = true;
+    return;
+  }
+  const clean = cleanStreamUrl(d.url);
+  if (!clean) return;
+  const fresh = !target.observed[itag];
+  target.observed[itag] = clean;
+  const f = target.formats.find((x) => x.itag === itag);
+  const n = q.get("n");
+  if (f && f.url && n) {
+    try {
+      const orig = new URL(f.url).searchParams.get("n");
+      if (orig && orig !== n) target.nMap[orig] = n;
+    } catch {}
+  }
+  if (q.get("pot")) target.pot = q.get("pot");
+  if (fresh) {
+    saveState();
+    notifyTab(d.tabId);
+  }
+}
+
+api.webRequest.onBeforeRequest.addListener((d) => ytOnRequest(d, false), { urls: ["*://*.googlevideo.com/videoplayback*"] });
+
+// Unlocked URL for a format, if one can be built.
+function ytUrl(v, f) {
+  if (v.observed[f.itag]) return v.observed[f.itag];
+  if (!f.url || f.drm) return "";
+  try {
+    const url = new URL(f.url);
+    const n = url.searchParams.get("n");
+    if (n) {
+      if (!v.nMap[n]) return ""; // the player hasn't unlocked this response yet
+      url.searchParams.set("n", v.nMap[n]);
+    } else if (!Object.keys(v.observed).length) {
+      return "";
+    }
+    if (v.pot && !url.searchParams.get("pot")) url.searchParams.set("pot", v.pot);
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+const isVideoOnly = (f) => f.mime.startsWith("video/") && !/mp4a|opus|vorbis|ac-3|ec-3/i.test(f.mime);
+const isAudioOnly = (f) => f.mime.startsWith("audio/");
+const isMuxed = (f) => f.mime.startsWith("video/") && /mp4a|opus|vorbis/i.test(f.mime);
+const containerOf = (f) => (/webm/i.test(f.mime) ? "webm" : "mp4");
+
+function ytEntries(v) {
+  const usable = v.formats.filter((f) => !f.drm).map((f) => ({ ...f, live: ytUrl(v, f) }));
+  const audios = usable.filter((f) => isAudioOnly(f) && f.live);
+  const bestAudio = (container) =>
+    audios
+      .filter((a) => containerOf(a) === container)
+      .sort((x, y) => (y.audioDefault - x.audioDefault) || y.bitrate - x.bitrate)[0];
+  const out = [];
+  const heights = [...new Set(usable.filter((f) => isVideoOnly(f) && f.live).map((f) => f.h))].sort((a, b) => b - a);
+  for (const h of heights) {
+    const at = usable.filter((f) => isVideoOnly(f) && f.live && f.h === h).sort((x, y) => y.fps - x.fps || y.bitrate - x.bitrate);
+    // Prefer MP4 (plays everywhere); WebM when that's all there is at this height.
+    for (const container of ["mp4", "webm"]) {
+      const vid = at.find((f) => containerOf(f) === container);
+      const aud = vid && bestAudio(container);
+      if (vid && aud) {
+        out.push({
+          kind: "yt",
+          label: vid.label || `${h}p`,
+          container: container.toUpperCase(),
+          ext: container,
+          fps: vid.fps,
+          size: vid.clen + aud.clen,
+          duration: v.duration,
+          video: vid.live,
+          audio: aud.live,
+          title: v.title,
+          found: v.found,
+        });
+        break;
+      }
+    }
+  }
+  for (const f of usable.filter((f) => isMuxed(f) && f.live)) {
+    if (!out.some((e) => e.label === (f.label || `${f.h}p`))) {
+      out.push({ kind: "yt", label: f.label || `${f.h}p`, container: containerOf(f).toUpperCase(), ext: containerOf(f), fps: f.fps, size: f.clen, duration: v.duration, video: f.live, audio: "", title: v.title, found: v.found });
+    }
+  }
+  const a = bestAudio("mp4") || bestAudio("webm");
+  if (a) {
+    out.push({ kind: "yt", label: "Audio", container: containerOf(a) === "mp4" ? "M4A" : "WEBM", ext: containerOf(a) === "mp4" ? "m4a" : "webm", fps: 0, size: a.clen, duration: v.duration, video: a.live, audio: "", title: v.title, found: v.found });
+  }
+  const locked = usable.filter((f) => (isVideoOnly(f) || isMuxed(f)) && !f.live).length;
+  if (!out.length) {
+    out.push({
+      kind: "yt-note",
+      title: v.title,
+      text: v.sabrSeen
+        ? "The player is streaming in a mode RDM can't read yet. Try switching quality in the player, then open this menu again."
+        : "Play the video for a few seconds, then open this menu again.",
+    });
+  } else if (locked) {
+    out.push({ kind: "yt-note", title: v.title, text: "Want a quality that isn't listed? Pick it in the player's settings, let it play a moment, then reopen this menu." });
+  }
+  return out;
+}
+
+function videoIdOf(pageUrl) {
+  try {
+    const u = new URL(pageUrl);
+    return u.searchParams.get("v") || (/^\/(?:shorts|embed|live|v)\/([\w-]{11})/.exec(u.pathname) || [])[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function ytList(tabId, pageUrl) {
+  const videos = yt.get(tabId);
+  if (!videos || !videos.size) return [];
+  const id = pageUrl ? videoIdOf(pageUrl) : "";
+  const v = (id && videos.get(id)) || [...videos.values()].sort((a, b) => b.found - a.found)[0];
+  return v ? ytEntries(v) : [];
 }
 
 // ------------------------------------------------------------ context menus
@@ -516,16 +746,16 @@ api.runtime.onMessage.addListener((msg, sender, respond) => {
       case "state": {
         if (!connected) await refreshSettings();
         const b = await buttonSettings();
-        respond({ connected, enabled: settings.enabled, show_button: b.show_button, blocked_hosts: b.blocked_hosts, media: mediaList(msg.tabId) });
+        respond({ connected, enabled: settings.enabled, show_button: b.show_button, blocked_hosts: b.blocked_hosts, media: mediaList(msg.tabId, msg.pageUrl) });
         break;
       }
       case "page-media":
         await freshSettings();
-        respond({ connected, media: mediaList(sender.tab?.id) });
+        respond({ connected, media: mediaList(sender.tab?.id, msg.pageUrl || sender.tab?.url) });
         break;
       case "button-settings":
         if (!lastRefresh) await refreshSettings();
-        respond({ ...(await buttonSettings()), count: media.get(sender.tab?.id)?.size || 0 });
+        respond({ ...(await buttonSettings()), count: mediaCount(sender.tab?.id) });
         break;
       case "show-button":
         await api.storage.local.set({ show_button: msg.enabled });
@@ -548,6 +778,10 @@ api.runtime.onMessage.addListener((msg, sender, respond) => {
       }
       case "keys":
         lastKeys = { keys: msg.keys || [], t: Date.now() };
+        respond({ ok: true });
+        break;
+      case "yt-player":
+        ytOnPlayer(sender.tab?.id, msg.data);
         respond({ ok: true });
         break;
       case "page-request":

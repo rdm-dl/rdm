@@ -10,7 +10,9 @@ pub mod grabber;
 pub mod hls;
 pub mod limiter;
 pub mod manager;
+pub mod mux;
 pub mod naming;
+pub mod pair;
 pub mod settings;
 pub mod storage;
 
