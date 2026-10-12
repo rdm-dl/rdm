@@ -370,19 +370,47 @@ function addMedia(tabId, info) {
   notifyTab(tabId);
 }
 
+// The Referer / Origin the browser actually sent for each media request. Players embedded
+// from another site send their own origin, and stream servers often insist on it.
+const sentHeaders = new Map(); // url -> { referer, origin, t }
+
+function onSendHeaders(d) {
+  if (d.tabId < 0) return;
+  const h = d.requestHeaders || [];
+  const referer = headerValue(h, "referer");
+  const origin = headerValue(h, "origin");
+  if (!referer && !origin) return;
+  sentHeaders.set(d.url.split("#")[0], { referer, origin, t: Date.now() });
+  if (sentHeaders.size > 2000) {
+    for (const [u, v] of sentHeaders) if (Date.now() - v.t > 10 * 60 * 1000) sentHeaders.delete(u);
+  }
+}
+try {
+  api.webRequest.onSendHeaders.addListener(onSendHeaders, { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object"] }, ["requestHeaders", "extraHeaders"]);
+} catch {
+  // Firefox has no "extraHeaders" (and doesn't hide these headers).
+  api.webRequest.onSendHeaders.addListener(onSendHeaders, { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object"] }, ["requestHeaders"]);
+}
+
+function requestContext(url) {
+  const h = sentHeaders.get(url.split("#")[0]);
+  return h ? { referer: h.referer || "", origin: h.origin || "" } : {};
+}
+
 // Classify one response (from webRequest or from the page hooks) and remember it.
 async function consider(tabId, url, type, size, total) {
   if (tabId == null || tabId < 0) return;
   if (/\.googlevideo\.com\//i.test(url)) return;
   await loadState();
   const key = url.split("#")[0];
+  const ctx = requestContext(key);
   if (media.get(tabId)?.has(key) || children.get(tabId)?.has(key)) return;
   const ext = extensionOf(url);
   const isManifest = MANIFEST_EXT.test(url) || /mpegurl|dash\+xml/i.test(type);
   const isSub = SUB_TYPES.test(type) || SUB_EXT.includes(ext);
   const isMedia = MEDIA_TYPES.test(type) || settings.media_extensions.includes(ext);
   if (isSub) {
-    addMedia(tabId, { url: key, kind: "subtitle", type: type || ext, size: total || size, found: Date.now() });
+    addMedia(tabId, { url: key, kind: "subtitle", type: type || ext, size: total || size, found: Date.now(), ...ctx });
     return;
   }
   if (!isMedia && !isManifest) return;
@@ -390,7 +418,7 @@ async function consider(tabId, url, type, size, total) {
     // Skip fragments of segmented streams and tiny files; keep the playlist/manifest instead.
     if (SEGMENT_EXT.test(url) || /[?&](range|bytes)=/i.test(url)) return;
     if (size > 0 && size < 256 * 1024 && !(total > size)) return;
-    addMedia(tabId, { url: key, kind: "file", type: type || ext.toUpperCase(), size: total || size, found: Date.now() });
+    addMedia(tabId, { url: key, kind: "file", type: type || ext.toUpperCase(), size: total || size, found: Date.now(), ...ctx });
     return;
   }
   const dash = /\.mpd(\?|$)/i.test(url) || /dash\+xml/i.test(type);
@@ -412,6 +440,7 @@ async function consider(tabId, url, type, size, total) {
     duration: Math.round(info.duration),
     size: 0,
     found: Date.now(),
+    ...ctx,
   });
 }
 
@@ -492,15 +521,24 @@ async function downloadMedia(msg, tab) {
       ...(await payload(watch, { referrer: tab?.url || "", filename: safeName(job.title || tab?.title, msg.ext || "mp4"), postData: JSON.stringify(job) })),
     });
   }
-  const quality = msg.quality ? `#rdm-quality=${msg.quality}` : "";
   const isStream = /\.(m3u8|mpd)(\?|$)/i.test(msg.url) || msg.kind === "stream";
+  // Tell RDM it is a stream (playlist URLs often have no .m3u8/.mpd) and which quality.
+  const known = tab && tab.id != null ? media.get(tab.id)?.get(msg.url.split("#")[0]) : null;
+  const kind = isStream ? (/dash/i.test((known && known.type) || "") || /\.mpd(\?|$)/i.test(msg.url) ? "dash" : "hls") : "";
+  const hints = [msg.quality ? `rdm-quality=${msg.quality}` : "", kind ? `rdm-kind=${kind}` : ""].filter(Boolean).join("&");
+  const quality = hints ? `#${hints}` : "";
   const title = msg.title || tab?.title;
   let filename = msg.filename;
   if (!filename && isStream) filename = safeName(title, "mp4");
   if (!filename && msg.kind === "subtitle") filename = safeName(title, extensionOf(msg.url) || "vtt");
+  // Send what the browser sent: the embedded player's Referer and Origin, not the page's.
+  const key = msg.url.split("#")[0];
+  const item = (tab && tab.id != null && media.get(tab.id)?.get(key)) || {};
+  const ctx = { ...requestContext(key), ...Object.fromEntries(Object.entries({ referer: item.referer, origin: item.origin }).filter(([, v]) => v)) };
+  const headers = ctx.origin ? { Origin: ctx.origin } : undefined;
   return send({
     type: "download",
-    ...(await payload(msg.url + quality, { referrer: msg.referrer || tab?.url || "", filename })),
+    ...(await payload(msg.url + quality, { referrer: ctx.referer || msg.referrer || tab?.url || "", filename, headers })),
   });
 }
 
@@ -910,7 +948,8 @@ api.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "rdm-link" && info.linkUrl) {
     await send({ type: "download", ...(await payload(info.linkUrl, { referrer, title: info.selectionText || info.linkText })) });
   } else if (info.menuItemId === "rdm-media" && info.srcUrl) {
-    await send({ type: "download", ...(await payload(info.srcUrl, { referrer })) });
+    const ctx = requestContext(info.srcUrl);
+    await send({ type: "download", ...(await payload(info.srcUrl, { referrer: ctx.referer || referrer, headers: ctx.origin ? { Origin: ctx.origin } : undefined })) });
   } else if ((info.menuItemId === "rdm-all" || info.menuItemId === "rdm-selection") && tab && tab.id != null) {
     const target = info.frameId ? { tabId: tab.id, frameIds: [info.frameId] } : { tabId: tab.id };
     const [res] = await api.scripting.executeScript({ target, func: collectLinks, args: [info.menuItemId === "rdm-selection"] });

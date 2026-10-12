@@ -22,6 +22,9 @@ struct Download {
     post_data: Option<String>,
     title: Option<String>,
     kind: Option<String>,
+    /// Extra request headers the browser sent for this URL (e.g. `Origin` of an embedded
+    /// player), as `{name: value}`.
+    headers: Option<std::collections::BTreeMap<String, String>>,
     /// Skip the confirmation dialog.
     silent: bool,
 }
@@ -35,6 +38,13 @@ impl Download {
             file_name: self.filename.clone().filter(|s| !s.is_empty()),
             user_agent: self.user_agent.clone().filter(|s| !s.is_empty()),
             post_data: self.post_data.clone(),
+            headers: self
+                .headers
+                .iter()
+                .flatten()
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             ..Default::default()
         }
     }

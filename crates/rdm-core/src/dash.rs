@@ -36,7 +36,8 @@ pub struct Track {
 }
 
 pub fn looks_like_dash(url: &str, content_type: Option<&str>) -> bool {
-    Url::parse(url).map(|u| u.path().to_ascii_lowercase().ends_with(".mpd")).unwrap_or(false)
+    crate::hls::kind_hint(url) == Some("dash")
+        || Url::parse(url).map(|u| u.path().to_ascii_lowercase().ends_with(".mpd")).unwrap_or(false)
         || content_type.is_some_and(|t| t.to_ascii_lowercase().contains("dash+xml"))
 }
 

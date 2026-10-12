@@ -56,7 +56,16 @@ pub struct Variant {
     pub audio: Option<String>,
 }
 
+/// `#rdm-kind=hls` / `#rdm-kind=dash`: the browser extension already knows the URL is a
+/// stream (playlist URLs often have no telling extension).
+pub fn kind_hint(url: &str) -> Option<&str> {
+    url.split_once('#')?.1.split('&').find_map(|kv| kv.strip_prefix("rdm-kind="))
+}
+
 pub fn looks_like_hls(url: &str, content_type: Option<&str>) -> bool {
+    if kind_hint(url) == Some("hls") {
+        return true;
+    }
     let path_hls = Url::parse(url).map(|u| u.path().to_ascii_lowercase().ends_with(".m3u8")).unwrap_or(false);
     let type_hls = content_type.is_some_and(|t| {
         let t = t.to_ascii_lowercase();
