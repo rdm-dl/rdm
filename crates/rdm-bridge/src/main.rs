@@ -59,13 +59,17 @@ fn write_message(stdout: &mut impl Write, v: &Value) {
     let _ = stdout.flush();
 }
 
-/// Connect to the app, starting it (minimized) if needed.
-async fn connect() -> Option<Client> {
+/// Connect to the app; start it (minimized) only when `launch` is set, i.e. for something
+/// the user did (a download, "Open RDM"), never for the extension's background checks.
+async fn connect(launch: bool) -> Option<Client> {
     let dir = data_dir();
     if let Ok(mut c) = Client::connect(&dir).await {
         if c.call(Request::Ping).await.is_ok() {
             return Some(c);
         }
+    }
+    if !launch {
+        return None;
     }
     let exe = std::env::current_exe().ok()?;
     let app = exe.with_file_name(if cfg!(windows) { "rdm-gui.exe" } else { "rdm-gui" });
@@ -90,7 +94,8 @@ async fn handle(client: &mut Option<Client>, msg: Value) -> Value {
         return json!({"type": if ok { "ok" } else { "error" }});
     }
     if client.is_none() {
-        *client = connect().await;
+        let user_action = matches!(kind.as_str(), "download" | "links" | "media" | "show");
+        *client = connect(user_action).await;
     }
     let Some(c) = client.as_mut() else {
         return json!({"type": "error", "message": "RDM is not running"});

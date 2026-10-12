@@ -46,23 +46,32 @@ function send(message) {
   });
 }
 
+// True once the app's lists are known (from the app, or remembered from an earlier session),
+// so downloads can be captured even while RDM is closed: the capture itself starts it.
+let settingsKnown = false;
+
 async function refreshSettings() {
   lastRefresh = Date.now();
-  const stored = await api.storage.local.get(["enabled"]);
+  const stored = await api.storage.local.get(["enabled", "captureSettings"]);
+  // Only checks whether RDM is running; the bridge doesn't start it for this.
   const reply = await send({ type: "hello" });
+  const before = JSON.stringify(settings);
   if (reply.type === "settings" && reply.capture) {
-    const before = JSON.stringify(settings);
     settings = { ...settings, ...reply.capture };
-    if (typeof stored.enabled === "boolean") settings.enabled = stored.enabled;
-    if (JSON.stringify(settings) !== before) broadcast({ type: "rdm-settings" });
-  } else if (typeof stored.enabled === "boolean") {
-    settings.enabled = stored.enabled;
+    settingsKnown = true;
+    api.storage.local.set({ captureSettings: reply.capture });
+  } else if (stored.captureSettings) {
+    settings = { ...settings, ...stored.captureSettings };
+    settingsKnown = true;
   }
+  if (typeof stored.enabled === "boolean") settings.enabled = stored.enabled;
+  if (JSON.stringify(settings) !== before) broadcast({ type: "rdm-settings" });
   return reply;
 }
 
 async function freshSettings() {
-  if (!connected || Date.now() - lastRefresh > 60 * 1000) await refreshSettings();
+  const age = Date.now() - lastRefresh;
+  if (age > 60 * 1000 || (!connected && age > 10 * 1000)) await refreshSettings();
 }
 
 async function broadcast(msg) {
@@ -168,7 +177,7 @@ function postBodyFor(...urls) {
 // "force" (key held), "skip", or a normal yes/no decision.
 function captureDecision(item, name) {
   const url = item.finalUrl || item.url;
-  if (!settings.enabled || !connected) return false;
+  if (!settings.enabled || !settingsKnown) return false;
   if (!/^(https?|ftp):/i.test(url)) return false; // blob:, data:, file: stay in the browser
   const keys = heldKeys();
   if (settings.skip_key !== "none" && keys.includes(settings.skip_key)) return false;
