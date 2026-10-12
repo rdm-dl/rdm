@@ -1,0 +1,69 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macos-arm64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            name: macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev libgl1-mesa-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: Test
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --workspace --release --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+      - name: Package
+        run: python tools/package.py --target ${{ matrix.target }} --name ${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDM-${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

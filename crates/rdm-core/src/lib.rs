@@ -5,6 +5,7 @@ pub mod config;
 pub mod dash;
 pub mod ipc;
 pub mod download;
+pub mod ftp;
 pub mod grabber;
 pub mod hls;
 pub mod limiter;

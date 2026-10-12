@@ -652,6 +652,9 @@ async fn run_inner(
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
     let client = build_client(&cfg, req)?;
     let tmp = TempDir::new(&temp_dir)?;
+    if url.scheme() == "ftp" {
+        return crate::ftp::run(req, &cfg, tmp, global_limiter, limiter, progress, control).await;
+    }
     if crate::hls::looks_like_hls(&req.url, None) {
         return crate::hls::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
     }

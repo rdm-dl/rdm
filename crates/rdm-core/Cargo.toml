@@ -21,6 +21,7 @@ chrono.workspace = true
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 roxmltree = "0.21.1"
+suppaftp = { version = "12", features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
