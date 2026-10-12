@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" width="28" height="28" />
+    <div class="title">
+      <strong>RDM</strong>
+      <span id="status" class="status">Checking…</span>
+    </div>
+    <label class="switch" title="Capture downloads">
+      <input type="checkbox" id="enabled" />
+      <span></span>
+    </label>
+  </header>
+
+  <section>
+    <h2>Media on this page</h2>
+    <ul id="media"></ul>
+    <p id="empty" class="empty">No video or audio detected yet. Start playing the media, then reopen this panel.</p>
+  </section>
+
+  <section class="add">
+    <input id="url" type="url" placeholder="Paste a link to download…" />
+    <button id="add">Add</button>
+  </section>
+
+  <footer>
+    <button id="open" class="ghost">Open RDM</button>
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>

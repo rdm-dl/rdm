@@ -1,0 +1,12 @@
+[package]
+name = "rdm-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native messaging host connecting the browser extension to RDM"
+
+[dependencies]
+rdm-core = { path = "../rdm-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true

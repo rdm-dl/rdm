@@ -652,6 +652,9 @@ async fn run_inner(
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
     let client = build_client(&cfg, req)?;
     let tmp = TempDir::new(&temp_dir)?;
+    if crate::hls::looks_like_hls(&req.url, None) {
+        return crate::hls::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+    }
     let saved = tmp.load().ok().flatten().filter(|s| s.url == req.url && s.resumable);
 
     // Probe (fresh) or validate (resume).
@@ -710,6 +713,12 @@ async fn run_inner(
         }
     };
 
+    // Playlist served without a .m3u8 extension.
+    if crate::hls::looks_like_hls(&req.url, info.content_type.as_deref()) {
+        drop(first_resp);
+        tmp.reset()?;
+        return crate::hls::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+    }
     let validator = info.etag.clone().or(info.last_modified.clone());
     let ctx = Arc::new(Ctx {
         client,

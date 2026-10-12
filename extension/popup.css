@@ -1,0 +1,77 @@
+:root {
+  --bg: #0f1116;
+  --surface: #181c24;
+  --surface-hi: #222732;
+  --border: #2a303c;
+  --text: #e8ebf1;
+  --dim: #8b93a5;
+  --accent: #5b7cff;
+  --ok: #34c77b;
+  --bad: #f05d5e;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7fb;
+    --surface: #ffffff;
+    --surface-hi: #f1f3f8;
+    --border: #dfe3ec;
+    --text: #161a23;
+    --dim: #6a7284;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  width: 360px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 "Inter", "Segoe UI", system-ui, sans-serif;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.title { flex: 1; display: flex; flex-direction: column; }
+.title strong { font-size: 15px; }
+.status { font-size: 11.5px; color: var(--dim); }
+.status.ok { color: var(--ok); }
+.status.bad { color: var(--bad); }
+section { padding: 12px 16px; }
+h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow: auto; }
+li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+li .info { flex: 1; min-width: 0; }
+li .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+li .meta { font-size: 11.5px; color: var(--dim); }
+button {
+  border: 0; border-radius: 9px; padding: 7px 12px; cursor: pointer;
+  background: var(--accent); color: #fff; font: 600 12.5px "Inter", "Segoe UI", sans-serif;
+}
+button:hover { filter: brightness(1.1); }
+button.ghost { background: var(--surface-hi); color: var(--text); width: 100%; }
+.empty { color: var(--dim); font-size: 12px; margin: 4px 0 0; }
+.add { display: flex; gap: 8px; border-top: 1px solid var(--border); }
+.add input {
+  flex: 1; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font: inherit;
+}
+footer { padding: 0 16px 14px; }
+.switch { position: relative; width: 38px; height: 22px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span {
+  position: absolute; inset: 0; border-radius: 11px; background: var(--surface-hi);
+  border: 1px solid var(--border); transition: .2s; cursor: pointer;
+}
+.switch span::after {
+  content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+  border-radius: 50%; background: var(--dim); transition: .2s;
+}
+.switch input:checked + span { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + span::after { left: 18px; background: #fff; }
