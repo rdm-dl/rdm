@@ -12,7 +12,7 @@ import tarfile
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXT_FILES = ["background.js", "popup.html", "popup.css", "popup.js"]
+EXT_FILES = ["background.js", "content.js", "document.js", "popup.html", "popup.css", "popup.js"]
 
 
 def version():

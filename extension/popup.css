@@ -75,3 +75,13 @@ footer { padding: 0 16px 14px; }
 }
 .switch input:checked + span { background: var(--accent); border-color: var(--accent); }
 .switch input:checked + span::after { left: 18px; background: #fff; }
+
+.prefs { border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border-radius: 999px; background: var(--surface-hi); border: 1px solid var(--border); font-size: 12px; }
+.chip button { padding: 0 6px; background: transparent; color: var(--dim); font-size: 14px; line-height: 1; }
+.chip button:hover { color: var(--text); }
+.qualities { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; max-width: 150px; }
+.qualities button { padding: 5px 8px; font-size: 11.5px; }
+.switch { display: inline-block; flex: none; }

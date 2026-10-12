@@ -75,6 +75,7 @@ pub fn default_queues() -> Vec<QueueDef> {
 
 /// Lists pushed to the browser extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct CaptureSettings {
     pub enabled: bool,
     /// File types taken over automatically.
@@ -87,6 +88,20 @@ pub struct CaptureSettings {
     pub exception_urls: Vec<String>,
     /// Don't capture files smaller than this (bytes, 0 = no minimum).
     pub min_size: u64,
+    /// Never treated as downloads, even when the server says "attachment".
+    pub ignore_extensions: Vec<String>,
+    /// MIME types that mean "this is a download" (combined with the extension list).
+    pub download_mimes: Vec<String>,
+    /// Show the floating "Download this video" button over videos.
+    pub show_video_button: bool,
+    /// Also show it over audio players.
+    pub show_audio_button: bool,
+    /// Hosts where the video button never appears.
+    pub no_button_hosts: Vec<String>,
+    /// Key that forces a capture while clicking a link: none, alt, ctrl, shift, insert.
+    pub force_key: String,
+    /// Key that lets the browser download instead: none, alt, ctrl, shift, delete.
+    pub skip_key: String,
 }
 
 impl Default for CaptureSettings {
@@ -103,6 +118,13 @@ impl Default for CaptureSettings {
             exception_hosts: list("*.update.microsoft.com download.windowsupdate.com *.download.windowsupdate.com"),
             exception_urls: vec![],
             min_size: 0,
+            ignore_extensions: list("txt htm html css js json apng gif ico jpeg jpg png svg webp"),
+            download_mimes: list("application/download application/force-download application/x-msdownload application/octet-stream binary/octet-stream"),
+            show_video_button: true,
+            show_audio_button: true,
+            no_button_hosts: list("*.gstatic.com media.tenor.co media*.giphy.com"),
+            force_key: "alt".into(),
+            skip_key: "ctrl".into(),
         }
     }
 }

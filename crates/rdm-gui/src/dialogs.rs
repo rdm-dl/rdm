@@ -158,6 +158,8 @@ pub struct Options {
     media_exts: String,
     hosts: String,
     urls: String,
+    ignore_exts: String,
+    no_button_hosts: String,
     new_login: SiteLogin,
     bridge_msg: Option<String>,
 }
@@ -170,6 +172,8 @@ impl Options {
             media_exts: s.capture.media_extensions.join(" "),
             hosts: s.capture.exception_hosts.join("\n"),
             urls: s.capture.exception_urls.join("\n"),
+            ignore_exts: s.capture.ignore_extensions.join(" "),
+            no_button_hosts: s.capture.no_button_hosts.join("\n"),
             s,
             tab: Tab::General,
             new_login: SiteLogin { prefix: String::new(), username: String::new(), password: String::new() },
@@ -184,11 +188,24 @@ impl Options {
         self.s.capture.media_extensions = words(&self.media_exts);
         self.s.capture.exception_hosts = lines(&self.hosts);
         self.s.capture.exception_urls = lines(&self.urls);
+        self.s.capture.ignore_extensions = words(&self.ignore_exts);
+        self.s.capture.no_button_hosts = lines(&self.no_button_hosts);
         let before = m.settings();
         if before.start_with_system != self.s.start_with_system {
             util::set_autostart(self.s.start_with_system);
         }
         m.set_settings(self.s.clone());
+    }
+}
+
+fn key_label(k: &str) -> &'static str {
+    match k {
+        "alt" => "Alt",
+        "ctrl" => "Ctrl",
+        "shift" => "Shift",
+        "insert" => "Insert",
+        "delete" => "Delete",
+        _ => "None",
     }
 }
 
@@ -499,16 +516,44 @@ fn options(app: &mut App, ctx: &egui::Context) {
                 ui.checkbox(&mut o.s.dark_mode, "Dark theme");
                 ui.add_space(8.0);
                 ui.label(RichText::new("Browser integration").strong());
-                ui.label("Install the RDM browser extension, then click below to register the browser bridge.");
-                if ui.button("Register browser bridge").clicked() {
-                    o.bridge_msg = Some(match crate::bridge::register() {
-                        Ok(m) => m,
-                        Err(e) => format!("Failed: {e}"),
-                    });
-                }
+                ui.label("Registers the browser bridge and offers the RDM extension to installed browsers.");
+                ui.horizontal(|ui| {
+                    if ui.button("Set up browser integration").clicked() {
+                        o.bridge_msg = Some(match crate::bridge::register() {
+                            Ok(m) => m,
+                            Err(e) => format!("Failed: {e}"),
+                        });
+                    }
+                    if ui.button("Remove browser integration").clicked() {
+                        o.bridge_msg = Some(crate::bridge::unregister());
+                    }
+                });
                 if let Some(m) = &o.bridge_msg {
                     ui.label(m);
                 }
+                ui.add_space(8.0);
+                ui.label(RichText::new("Download button").strong());
+                ui.checkbox(&mut o.s.capture.show_video_button, "Show the download button over videos");
+                ui.checkbox(&mut o.s.capture.show_audio_button, "Show it over audio players too");
+                ui.label("Never show the button on these sites (one per line, * wildcards):");
+                ui.add(egui::TextEdit::multiline(&mut o.no_button_hosts).desired_rows(3).desired_width(f32::INFINITY));
+                ui.add_space(8.0);
+                ui.label(RichText::new("Keys").strong());
+                let keys = |ui: &mut egui::Ui, id: &str, v: &mut String, opts: &[&str]| {
+                    egui::ComboBox::from_id_salt(id.to_string()).selected_text(key_label(v)).show_ui(ui, |ui| {
+                        for k in opts {
+                            ui.selectable_value(v, k.to_string(), key_label(k));
+                        }
+                    });
+                };
+                egui::Grid::new("keys").num_columns(2).show(ui, |ui| {
+                    ui.label("Hold while clicking to always download with RDM");
+                    keys(ui, "force_key", &mut o.s.capture.force_key, &["none", "alt", "shift", "insert"]);
+                    ui.end_row();
+                    ui.label("Hold while clicking to let the browser download");
+                    keys(ui, "skip_key", &mut o.s.capture.skip_key, &["none", "ctrl", "shift", "delete"]);
+                    ui.end_row();
+                });
             }
             Tab::FileTypes => {
                 ui.label("Automatically take over downloads of these file types:");
@@ -519,6 +564,8 @@ fn options(app: &mut App, ctx: &egui::Context) {
                 ui.add(egui::TextEdit::multiline(&mut o.hosts).desired_rows(4).desired_width(f32::INFINITY));
                 ui.label("Never take over these addresses:");
                 ui.add(egui::TextEdit::multiline(&mut o.urls).desired_rows(3).desired_width(f32::INFINITY));
+                ui.label("Never treat these types as downloads:");
+                ui.add(egui::TextEdit::multiline(&mut o.ignore_exts).desired_rows(2).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
                     ui.label("Don't take over files smaller than");
                     let mut kb = o.s.capture.min_size / 1024;

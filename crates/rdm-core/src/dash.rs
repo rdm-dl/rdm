@@ -234,8 +234,18 @@ pub fn parse_mpd(xml: &str, mpd_url: &Url) -> Result<Vec<Track>> {
 
 /// Highest-bandwidth video and audio tracks.
 pub fn pick_best(tracks: &[Track]) -> (Option<&Track>, Option<&Track>) {
-    let best = |k: &str| tracks.iter().filter(|t| t.kind == k).max_by_key(|t| (t.height.unwrap_or(0), t.bandwidth));
-    (best("video"), best("audio"))
+    pick(tracks, None)
+}
+
+/// Best video at or below `max_height` (lowest available if none fits) and best audio.
+pub fn pick(tracks: &[Track], max_height: Option<u32>) -> (Option<&Track>, Option<&Track>) {
+    let key = |t: &&Track| (t.height.unwrap_or(0), t.bandwidth);
+    let videos = || tracks.iter().filter(|t| t.kind == "video");
+    let video = match max_height {
+        Some(h) => videos().filter(|t| t.height.unwrap_or(0) <= h).max_by_key(key).or_else(|| videos().min_by_key(key)),
+        None => videos().max_by_key(key),
+    };
+    (video, tracks.iter().filter(|t| t.kind == "audio").max_by_key(key))
 }
 
 async fn fetch(client: &Client, s: &SegRef, req: &DownloadRequest) -> Result<Vec<u8>> {
@@ -276,7 +286,7 @@ pub async fn run(
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(e.to_string()))?;
     let xml = String::from_utf8_lossy(&fetch(&client, &SegRef { url: url.clone(), range: None }, req).await?).into_owned();
     let tracks = parse_mpd(&xml, &url)?;
-    let (video, audio) = pick_best(&tracks);
+    let (video, audio) = pick(&tracks, crate::hls::quality_hint(&url));
     let chosen: Vec<(&str, &Track)> = [("video", video), ("audio", audio)].into_iter().filter_map(|(n, t)| t.map(|t| (n, t))).collect();
 
     let stem = req

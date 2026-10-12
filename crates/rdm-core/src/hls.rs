@@ -1,6 +1,7 @@
 //! HLS (`.m3u8`) stream downloading.
 //!
-//! The master playlist's highest-bandwidth variant is chosen, segments are fetched in
+//! The master playlist's highest-bandwidth variant (or the best one at or below a
+//! requested height) is chosen together with its separate audio rendition, if any; segments are fetched in
 //! parallel (one file each, so a pause/resume only refetches missing segments),
 //! AES-128 segments are decrypted, and everything is joined into one file. If `ffmpeg`
 //! is available, MPEG-TS output is remuxed into MP4.
@@ -51,6 +52,8 @@ pub struct Variant {
     pub url: Url,
     pub bandwidth: u64,
     pub resolution: Option<String>,
+    /// `AUDIO` group id of a separate audio rendition.
+    pub audio: Option<String>,
 }
 
 pub fn looks_like_hls(url: &str, content_type: Option<&str>) -> bool {
@@ -114,6 +117,7 @@ pub fn parse_master(text: &str, base: &Url) -> Vec<Variant> {
                     url,
                     bandwidth: a.get("BANDWIDTH").and_then(|b| b.parse().ok()).unwrap_or(0),
                     resolution: a.get("RESOLUTION").cloned(),
+                    audio: a.get("AUDIO").cloned(),
                 });
             }
         }
@@ -193,6 +197,68 @@ fn ffmpeg_available() -> bool {
 }
 
 /// Download an HLS stream. Returns the final file path, or `None` if paused.
+/// An `EXT-X-MEDIA` audio rendition with its own playlist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioRendition {
+    pub group: String,
+    pub url: Url,
+    pub default: bool,
+    pub language: Option<String>,
+}
+
+/// Audio renditions (separate audio playlists) declared by a master playlist.
+pub fn parse_audio(text: &str, base: &Url) -> Vec<AudioRendition> {
+    text.lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("#EXT-X-MEDIA:"))
+        .map(attrs)
+        .filter(|a| a.get("TYPE").is_some_and(|t| t.eq_ignore_ascii_case("AUDIO")))
+        .filter_map(|a| {
+            Some(AudioRendition {
+                group: a.get("GROUP-ID")?.clone(),
+                url: base.join(a.get("URI")?).ok()?,
+                default: a.get("DEFAULT").is_some_and(|d| d.eq_ignore_ascii_case("YES")),
+                language: a.get("LANGUAGE").cloned(),
+            })
+        })
+        .collect()
+}
+
+/// Requested maximum video height, passed as a `#rdm-quality=720` URL fragment
+/// (fragments never reach the server).
+pub fn quality_hint(url: &Url) -> Option<u32> {
+    url.fragment()?.split('&').find_map(|kv| kv.strip_prefix("rdm-quality=")?.trim_end_matches('p').parse().ok())
+}
+
+fn variant_height(v: &Variant) -> u32 {
+    v.resolution.as_deref().and_then(|r| r.split_once(['x', 'X'])).and_then(|(_, h)| h.parse().ok()).unwrap_or(0)
+}
+
+/// The variant to download: the best one, or the best at or below the requested height.
+pub fn pick_variant(variants: &[Variant], max_height: Option<u32>) -> Option<&Variant> {
+    match max_height {
+        Some(h) => variants
+            .iter()
+            .filter(|v| variant_height(v) <= h)
+            .max_by_key(|v| (variant_height(v), v.bandwidth))
+            .or_else(|| variants.iter().min_by_key(|v| (variant_height(v), v.bandwidth))),
+        None => variants.iter().max_by_key(|v| (v.bandwidth, variant_height(v))),
+    }
+}
+
+fn segment_ext(pl: &MediaPlaylist) -> &'static str {
+    if pl.init.is_some() {
+        return "mp4";
+    }
+    let ext = pl.segments.first().and_then(|s| s.url.path().rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()));
+    match ext.as_deref() {
+        Some("aac") => "aac",
+        Some("mp3") => "mp3",
+        Some("m4a") | Some("m4s") | Some("mp4") => "mp4",
+        _ => "ts",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     req: &DownloadRequest,
@@ -204,29 +270,42 @@ pub async fn run(
     progress: &watch::Sender<Progress>,
     control: &mut watch::Receiver<Control>,
 ) -> Result<Option<PathBuf>> {
-    let mut url = Url::parse(&req.url).map_err(|e| DownloadError::Other(e.to_string()))?;
-    let mut text = String::from_utf8_lossy(&fetch(&client, &url, None, req).await?).into_owned();
-    let variants = parse_master(&text, &url);
-    if let Some(best) = variants.iter().max_by_key(|v| v.bandwidth) {
-        url = best.url.clone();
-        text = String::from_utf8_lossy(&fetch(&client, &url, None, req).await?).into_owned();
+    let master_url = Url::parse(&req.url).map_err(|e| DownloadError::Other(e.to_string()))?;
+    let master = String::from_utf8_lossy(&fetch(&client, &master_url, None, req).await?).into_owned();
+    let variants = parse_master(&master, &master_url);
+    // (kind, playlist): video first, then a separate audio rendition when the variant has one.
+    let mut tracks: Vec<(&'static str, MediaPlaylist)> = vec![];
+    match pick_variant(&variants, quality_hint(&master_url)) {
+        Some(v) => {
+            let text = String::from_utf8_lossy(&fetch(&client, &v.url, None, req).await?).into_owned();
+            tracks.push(("video", parse_media(&text, &v.url)?));
+            if let Some(group) = &v.audio {
+                let renditions: Vec<_> = parse_audio(&master, &master_url).into_iter().filter(|r| &r.group == group).collect();
+                if let Some(r) = renditions.iter().find(|r| r.default).or(renditions.first()) {
+                    let text = String::from_utf8_lossy(&fetch(&client, &r.url, None, req).await?).into_owned();
+                    tracks.push(("audio", parse_media(&text, &r.url)?));
+                }
+            }
+        }
+        None => tracks.push(("video", parse_media(&master, &master_url)?)),
     }
-    let pl = parse_media(&text, &url)?;
-    if pl.live {
+    if tracks.iter().any(|(_, pl)| pl.live) {
         return Err(DownloadError::Other("live HLS streams are not supported yet".into()));
     }
-    let fmp4 = pl.init.is_some();
     let base_name = req
         .file_name
         .clone()
         .map(|n| naming::sanitize(&n))
-        .or_else(|| naming::from_url(&Url::parse(&req.url).ok()?).map(|n| naming::sanitize(&n)))
+        .or_else(|| naming::from_url(&master_url).map(|n| naming::sanitize(&n)))
         .unwrap_or_else(|| "stream".into());
-    let stem = base_name.rsplit_once('.').map_or(base_name.clone(), |(s, e)| if e.eq_ignore_ascii_case("m3u8") || e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("ts") { s.to_string() } else { base_name.clone() });
+    let stem = base_name.rsplit_once('.').map_or(base_name.clone(), |(s, e)| if ["m3u8", "mp4", "ts"].contains(&e.to_ascii_lowercase().as_str()) { s.to_string() } else { base_name.clone() });
     let can_remux = ffmpeg_available();
-    let ext = if fmp4 || can_remux { "mp4" } else { "ts" };
+    let video_ext = segment_ext(&tracks[0].1);
+    let ext = if video_ext == "mp4" || can_remux { "mp4" } else { video_ext };
     let file_name = format!("{stem}.{ext}");
-    let n = pl.segments.len();
+    // Flat job list over all tracks.
+    let jobs: Vec<(usize, usize)> = tracks.iter().enumerate().flat_map(|(t, (_, pl))| (0..pl.segments.len()).map(move |i| (t, i))).collect();
+    let n = jobs.len();
     progress.send_modify(|p| {
         p.status = Status::Downloading;
         p.file_name = file_name.clone();
@@ -234,22 +313,25 @@ pub async fn run(
         p.total = None;
     });
 
-    let seg_path = |i: usize| tmp.path.join(format!("seg{i:06}.bin"));
-    let mut done: Vec<bool> = (0..n).map(|i| seg_path(i).exists()).collect();
+    let seg_path = |(t, i): (usize, usize)| tmp.path.join(format!("t{t}_seg{i:06}.bin"));
+    let init_path = |t: usize| tmp.path.join(format!("t{t}_init.bin"));
+    let mut done: Vec<bool> = jobs.iter().map(|&j| seg_path(j).exists()).collect();
     let bytes_done = Arc::new(std::sync::atomic::AtomicU64::new(
-        (0..n).filter(|&i| done[i]).map(|i| std::fs::metadata(seg_path(i)).map_or(0, |m| m.len())).sum(),
+        jobs.iter().filter(|&&j| seg_path(j).exists()).map(|&j| std::fs::metadata(seg_path(j)).map_or(0, |m| m.len())).sum(),
     ));
     let keys: Arc<Mutex<HashMap<Url, [u8; 16]>>> = Arc::new(Mutex::new(HashMap::new()));
-    let pl = Arc::new(pl);
     let req = Arc::new(req.clone());
 
-    if let Some((init_url, br)) = &pl.init {
-        let p = tmp.path.join("init.bin");
-        if !p.exists() {
-            let data = fetch(&client, init_url, *br, &req).await?;
-            std::fs::write(&p, data)?;
+    for (t, (_, pl)) in tracks.iter().enumerate() {
+        if let Some((init_url, br)) = &pl.init {
+            let p = init_path(t);
+            if !p.exists() {
+                let data = fetch(&client, init_url, *br, &req).await?;
+                std::fs::write(&p, data)?;
+            }
         }
     }
+    let tracks = Arc::new(tracks);
 
     let mut set: JoinSet<(usize, Result<u64>)> = JoinSet::new();
     let mut next = 0usize;
@@ -261,10 +343,11 @@ pub async fn run(
                 next += 1;
                 continue;
             }
-            let (i, client, pl, req, keys, path, limiter, global, counter) =
-                (next, client.clone(), pl.clone(), req.clone(), keys.clone(), seg_path(next), limiter.clone(), global_limiter.clone(), bytes_done.clone());
+            let (job, (t, si)) = (next, jobs[next]);
+            let (client, tracks, req, keys, path, limiter, global, counter) =
+                (client.clone(), tracks.clone(), req.clone(), keys.clone(), seg_path((t, si)), limiter.clone(), global_limiter.clone(), bytes_done.clone());
             set.spawn(async move {
-                let seg = &pl.segments[i];
+                let seg = &tracks[t].1.segments[si];
                 let mut attempt = 0;
                 loop {
                     attempt += 1;
@@ -300,8 +383,8 @@ pub async fn run(
                     }
                     .await;
                     match r {
-                        Ok(b) => return (i, Ok(b)),
-                        Err(e) if attempt >= 8 => return (i, Err(e)),
+                        Ok(b) => return (job, Ok(b)),
+                        Err(e) if attempt >= 8 => return (job, Err(e)),
                         Err(_) => tokio::time::sleep(Duration::from_millis(500 * attempt)).await,
                     }
                 }
@@ -352,47 +435,64 @@ pub async fn run(
         }
     }
 
-    // Join segments.
+    // Join each track's segments.
     progress.send_modify(|p| p.status = Status::Assembling);
-    let joined = tmp.path.join(if fmp4 { "joined.mp4" } else { "joined.ts" });
-    {
-        let mut out = std::fs::File::create(&joined)?;
-        let init = tmp.path.join("init.bin");
-        if init.exists() {
-            out.write_all(&std::fs::read(&init)?)?;
+    let mut joined = vec![];
+    for (t, (kind, pl)) in tracks.iter().enumerate() {
+        let path = tmp.path.join(format!("{kind}.{}", segment_ext(pl)));
+        let mut out = std::fs::File::create(&path)?;
+        if init_path(t).exists() {
+            out.write_all(&std::fs::read(init_path(t))?)?;
         }
-        for i in 0..n {
-            out.write_all(&std::fs::read(seg_path(i))?)?;
+        for i in 0..pl.segments.len() {
+            out.write_all(&std::fs::read(seg_path((t, i)))?)?;
         }
         out.sync_all()?;
+        joined.push((*kind, path));
     }
     std::fs::create_dir_all(&req.dir)?;
     let dest = naming::unique_path(&req.dir, &file_name);
-    if !fmp4 && can_remux {
-        let ok = tokio::process::Command::new("ffmpeg")
-            .args(["-y", "-loglevel", "error", "-i"])
-            .arg(&joined)
-            .args(["-c", "copy", "-bsf:a", "aac_adtstoasc"])
-            .arg(&dest)
-            .status()
-            .await
-            .is_ok_and(|s| s.success());
-        if !ok {
-            let ts = dest.with_extension("ts");
-            move_file(&joined, &ts)?;
-            let _ = tmp.remove();
-            return Ok(Some(ts));
+    let result = if joined.len() == 1 && (video_ext == "mp4" || !can_remux) {
+        move_file(&joined[0].1, &dest)?;
+        dest
+    } else if can_remux {
+        let mut cmd = tokio::process::Command::new("ffmpeg");
+        cmd.args(["-y", "-loglevel", "error"]);
+        for (_, f) in &joined {
+            cmd.arg("-i").arg(f);
         }
+        if joined.len() > 1 {
+            cmd.args(["-map", "0:v:0?", "-map", "1:a:0"]);
+        }
+        cmd.args(["-c", "copy"]).arg(&dest);
+        if cmd.status().await.is_ok_and(|s| s.success()) { dest } else { keep_separate(&joined, &req.dir, &stem)? }
     } else {
-        move_file(&joined, &dest)?;
-    }
-    let total = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        keep_separate(&joined, &req.dir, &stem)?
+    };
+    let total = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
     progress.send_modify(|p| {
         p.total = Some(total);
         p.downloaded = total;
     });
     let _ = tmp.remove();
-    Ok(Some(dest))
+    Ok(Some(result))
+}
+
+/// Without ffmpeg (or if muxing fails): keep tracks as separate files; returns the video path.
+fn keep_separate(tracks: &[(&str, PathBuf)], dir: &Path, stem: &str) -> Result<PathBuf> {
+    let mut video = None;
+    let single = tracks.len() == 1;
+    for (kind, f) in tracks {
+        let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+        let ext = if *kind == "audio" && ext == "mp4" { "m4a" } else { ext };
+        let name = if single { format!("{stem}.{ext}") } else { format!("{stem}.{kind}.{ext}") };
+        let dest = naming::unique_path(dir, &name);
+        move_file(f, &dest)?;
+        if *kind == "video" || video.is_none() {
+            video = Some(dest);
+        }
+    }
+    video.ok_or_else(|| DownloadError::Other("nothing downloaded".into()))
 }
 
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -406,6 +506,23 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_hint_and_variant_choice() {
+        let base = Url::parse("https://cdn.example.com/m.m3u8#rdm-quality=720p").unwrap();
+        assert_eq!(quality_hint(&base), Some(720));
+        assert_eq!(quality_hint(&Url::parse("https://x/m.m3u8").unwrap()), None);
+        let m = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a/en.m3u8\"\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",URI=\"s.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aac\"\n360.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,AUDIO=\"aac\"\n720.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,AUDIO=\"aac\"\n1080.m3u8\n";
+        let v = parse_master(m, &base);
+        assert_eq!(pick_variant(&v, None).unwrap().url.path(), "/1080.m3u8");
+        assert_eq!(pick_variant(&v, Some(720)).unwrap().url.path(), "/720.m3u8");
+        assert_eq!(pick_variant(&v, Some(144)).unwrap().url.path(), "/360.m3u8");
+        assert_eq!(v[0].audio.as_deref(), Some("aac"));
+        let a = parse_audio(m, &base);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].url.as_str(), "https://cdn.example.com/a/en.m3u8");
+        assert!(a[0].default);
+    }
 
     #[test]
     fn master_picks_variants() {

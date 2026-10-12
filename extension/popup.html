@@ -23,6 +23,17 @@
     <p id="empty" class="empty">No video or audio detected yet. Start playing the media, then reopen this panel.</p>
   </section>
 
+  <section class="prefs">
+    <label class="row">
+      <span>Show download button on videos</span>
+      <span class="switch small"><input type="checkbox" id="showButton" /><span></span></span>
+    </label>
+    <div id="blockedWrap" hidden>
+      <h2>Button hidden on</h2>
+      <div id="blocked" class="chips"></div>
+    </div>
+  </section>
+
   <section class="add">
     <input id="url" type="url" placeholder="Paste a link to download…" />
     <button id="add">Add</button>
