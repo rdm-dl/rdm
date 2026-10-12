@@ -655,6 +655,9 @@ async fn run_inner(
     if crate::hls::looks_like_hls(&req.url, None) {
         return crate::hls::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
     }
+    if crate::dash::looks_like_dash(&req.url, None) {
+        return crate::dash::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+    }
     let saved = tmp.load().ok().flatten().filter(|s| s.url == req.url && s.resumable);
 
     // Probe (fresh) or validate (resume).
@@ -718,6 +721,11 @@ async fn run_inner(
         drop(first_resp);
         tmp.reset()?;
         return crate::hls::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+    }
+    if crate::dash::looks_like_dash(&req.url, info.content_type.as_deref()) {
+        drop(first_resp);
+        tmp.reset()?;
+        return crate::dash::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
     }
     let validator = info.etag.clone().or(info.last_modified.clone());
     let ctx = Arc::new(Ctx {
@@ -1005,6 +1013,8 @@ pub struct ProbeInfo {
     pub content_type: Option<String>,
     pub resumable: bool,
     pub final_url: String,
+    pub last_modified: Option<String>,
+    pub etag: Option<String>,
 }
 
 /// Request the URL, read only the headers, and report name/size/range support.
@@ -1025,5 +1035,7 @@ pub async fn probe_info(req: &DownloadRequest, cfg: &EngineConfig) -> Result<Pro
         content_type: si.content_type,
         resumable: si.accept_ranges && si.total.is_some(),
         final_url: final_url.to_string(),
+        last_modified: si.last_modified,
+        etag: si.etag,
     })
 }

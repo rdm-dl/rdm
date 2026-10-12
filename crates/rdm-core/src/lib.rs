@@ -2,6 +2,7 @@
 
 pub mod chunks;
 pub mod config;
+pub mod dash;
 pub mod ipc;
 pub mod download;
 pub mod grabber;

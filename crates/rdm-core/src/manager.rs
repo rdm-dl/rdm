@@ -6,7 +6,7 @@
 use crate::download::{ChunkView, Download, DownloadHandle, DownloadRequest, Progress, Status};
 use crate::limiter::Limiter;
 use crate::naming;
-use crate::settings::{MAIN_QUEUE, OnQueueDone, Settings};
+use crate::settings::{MAIN_QUEUE, OnQueueDone, SYNC_QUEUE, Settings};
 use chrono::{Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -106,6 +106,8 @@ struct State {
     quota_until: Option<i64>,
     /// Last scheduler minute processed per queue (avoid double triggers).
     sched_fired: HashMap<(u32, bool), i64>,
+    /// Completed items already checked in the current synchronization run.
+    synced: HashSet<ItemId>,
     dirty: bool,
     last_save: Instant,
 }
@@ -161,6 +163,7 @@ impl Manager {
                     quota_log: VecDeque::new(),
                     quota_until: None,
                     sched_fired: HashMap::new(),
+                    synced: HashSet::new(),
                     dirty: false,
                     last_save: Instant::now(),
                 }),
@@ -438,6 +441,9 @@ impl Manager {
     pub fn start_queue(&self, q: u32) {
         let mut st = self.inner.state.lock().unwrap();
         st.active_queues.insert(q);
+        if q == SYNC_QUEUE {
+            st.synced.clear();
+        }
         for it in st.items.values_mut() {
             if it.queue == q && matches!(it.state, ItemState::Stopped | ItemState::Failed(_)) {
                 it.state = ItemState::Queued;
@@ -542,7 +548,69 @@ impl Manager {
         }
     }
 
+    /// Has the server copy of a completed download changed? (newer Last-Modified or other size)
+    pub async fn check_update(&self, id: ItemId) -> Result<bool, crate::DownloadError> {
+        let (req, cfg, path, total) = {
+            let st = self.inner.state.lock().unwrap();
+            let it = st.items.get(&id).ok_or_else(|| crate::DownloadError::Other("no such item".into()))?;
+            (it.request.clone(), st.settings.engine.clone(), it.final_path.clone(), it.total)
+        };
+        let info = crate::download::probe_info(&req, &cfg).await?;
+        let Some(path) = path.filter(|p| p.exists()) else { return Ok(true) };
+        if let (Some(server), Some(local)) = (info.total, total) {
+            if server != local {
+                return Ok(true);
+            }
+        }
+        let local_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok().map(chrono::DateTime::<chrono::Utc>::from);
+        let server_mtime = info
+            .last_modified
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc2822(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc));
+        Ok(matches!((server_mtime, local_mtime), (Some(s), Some(l)) if s > l))
+    }
+
+    /// Synchronization queue: re-check completed items and re-download changed ones.
+    fn run_sync(&self) {
+        let ids: Vec<ItemId> = {
+            let mut st = self.inner.state.lock().unwrap();
+            if !st.active_queues.contains(&SYNC_QUEUE) {
+                return;
+            }
+            let ids: Vec<ItemId> = st
+                .items
+                .values()
+                .filter(|i| i.queue == SYNC_QUEUE && i.state == ItemState::Complete && !st.synced.contains(&i.id))
+                .map(|i| i.id)
+                .collect();
+            st.synced.extend(ids.iter().copied());
+            ids
+        };
+        for id in ids {
+            let me = self.clone();
+            tokio::spawn(async move {
+                if let Ok(true) = me.check_update(id).await {
+                    {
+                        let mut st = me.inner.state.lock().unwrap();
+                        if let Some(it) = st.items.get_mut(&id) {
+                            it.state = ItemState::Queued;
+                            it.downloaded = 0;
+                            it.request.file_name = it.final_path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+                            if let Some(dir) = it.final_path.as_ref().and_then(|p| p.parent()) {
+                                it.request.dir = dir.to_path_buf();
+                            }
+                            st.dirty = true;
+                        }
+                    }
+                    me.emit(Event::Changed(id));
+                }
+            });
+        }
+    }
+
     fn run_queues(&self) {
+        self.run_sync();
         let mut to_start = vec![];
         let mut done = vec![];
         {
