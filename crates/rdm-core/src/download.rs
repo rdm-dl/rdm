@@ -221,9 +221,24 @@ enum WorkerExit {
     Corrupt,
 }
 
+/// Cloneable remote control for a running download.
+#[derive(Clone)]
+pub struct DownloadHandle {
+    control: Arc<watch::Sender<Control>>,
+}
+
+impl DownloadHandle {
+    pub fn pause(&self) {
+        let _ = self.control.send(Control::Pause);
+    }
+    pub fn cancel(&self) {
+        let _ = self.control.send(Control::Cancel);
+    }
+}
+
 pub struct Download {
     pub progress: watch::Receiver<Progress>,
-    control: watch::Sender<Control>,
+    control: Arc<watch::Sender<Control>>,
     task: tokio::task::JoinHandle<Result<Option<PathBuf>>>,
 }
 
@@ -234,7 +249,7 @@ impl Download {
         let (ptx, prx) = watch::channel(Progress::new(name));
         let (ctx_tx, crx) = watch::channel(Control::Run);
         let task = tokio::spawn(run(req, cfg, temp_dir, global_limiter, ptx, crx));
-        Self { progress: prx, control: ctx_tx, task }
+        Self { progress: prx, control: Arc::new(ctx_tx), task }
     }
 
     pub fn pause(&self) {
@@ -243,6 +258,10 @@ impl Download {
 
     pub fn cancel(&self) {
         let _ = self.control.send(Control::Cancel);
+    }
+
+    pub fn handle(&self) -> DownloadHandle {
+        DownloadHandle { control: self.control.clone() }
     }
 
     /// Wait for the download to finish. `Ok(Some(path))` when complete, `Ok(None)` when paused.
@@ -271,7 +290,19 @@ fn build_client(cfg: &EngineConfig, req: &DownloadRequest) -> Result<Client> {
         }
     }
     let ua = req.user_agent.clone().unwrap_or_else(|| cfg.user_agent.clone());
-    Ok(Client::builder()
+    let mut builder = Client::builder();
+    match cfg.proxy.as_deref() {
+        None | Some("") | Some("system") => {}
+        Some("none") => builder = builder.no_proxy(),
+        Some(url) => {
+            let mut p = reqwest::Proxy::all(url).map_err(DownloadError::Http)?;
+            if let Some(u) = &cfg.proxy_user {
+                p = p.basic_auth(u, cfg.proxy_pass.as_deref().unwrap_or(""));
+            }
+            builder = builder.proxy(p);
+        }
+    }
+    Ok(builder
         .default_headers(headers)
         .user_agent(ua)
         .connect_timeout(cfg.timeout)

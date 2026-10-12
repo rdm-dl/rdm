@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EngineConfig {
     /// Maximum simultaneous connections per download (default 8).
@@ -35,6 +35,10 @@ pub struct EngineConfig {
     /// Retries per chunk before the download fails (0 = unlimited).
     pub max_retries: u32,
     pub user_agent: String,
+    /// `None`/`system` = system proxy, `none` = direct, or `http://`, `https://`, `socks5://` URL.
+    pub proxy: Option<String>,
+    pub proxy_user: Option<String>,
+    pub proxy_pass: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -55,6 +59,9 @@ impl Default for EngineConfig {
             timeout: Duration::from_secs(30),
             max_retries: 20,
             user_agent: format!("Mozilla/5.0 (compatible; RDM/{})", env!("CARGO_PKG_VERSION")),
+            proxy: None,
+            proxy_user: None,
+            proxy_pass: None,
         }
     }
 }

@@ -16,6 +16,8 @@ url.workspace = true
 percent-encoding.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
+dirs.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

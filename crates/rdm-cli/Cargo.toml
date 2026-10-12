@@ -1,6 +1,18 @@
 [package]
 name = "rdm-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RDM command-line downloader"
+
+[[bin]]
+name = "rdm"
+path = "src/main.rs"
 
 [dependencies]
+rdm-core = { path = "../rdm-core" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing-subscriber.workspace = true
+indicatif = "0.17"
