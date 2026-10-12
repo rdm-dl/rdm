@@ -199,3 +199,36 @@ mod tests {
         assert!(clipboard_link("https://a.com/x.r01", &exts).is_some());
     }
 }
+
+/// Error text for people: common HTTP statuses and network failures in plain words, with
+/// the technical detail kept short.
+pub fn friendly_error(e: &str) -> String {
+    let code = e.strip_prefix("server returned status ").and_then(|s| s.split_whitespace().next()).and_then(|c| c.parse::<u16>().ok());
+    if let Some(c) = code {
+        let what = match c {
+            401 => "The server wants a login",
+            403 => "The server refused access",
+            404 => "File not found on the server",
+            410 => "The file was removed from the server",
+            416 => "The server can't resume this file",
+            429 => "The server says too many requests; try again later",
+            500..=599 => "The server had a problem",
+            _ => "The server refused the download",
+        };
+        return format!("{what} ({c})");
+    }
+    let lower = e.to_ascii_lowercase();
+    if lower.contains("dns") || lower.contains("failed to lookup") || lower.contains("no such host") {
+        return "Couldn't find the server (check the address or your connection)".into();
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return "The server stopped responding (timed out)".into();
+    }
+    if lower.contains("connection refused") || lower.contains("error sending request") {
+        return "Couldn't connect to the server".into();
+    }
+    if lower.contains("no space") || lower.contains("disk full") {
+        return "Not enough disk space".into();
+    }
+    e.to_string()
+}

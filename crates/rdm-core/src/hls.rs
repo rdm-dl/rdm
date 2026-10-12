@@ -13,7 +13,6 @@ use crate::storage::TempDir;
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use reqwest::Client;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -446,37 +445,47 @@ pub async fn run(
 
     // Join each track's segments.
     progress.send_modify(|p| p.status = Status::Assembling);
+    // Joined off the async workers, with progress.
     let mut joined = vec![];
+    let mut work = vec![];
     for (t, (kind, pl)) in tracks.iter().enumerate() {
         let path = tmp.path.join(format!("{kind}.{}", segment_ext(pl)));
-        let mut out = std::fs::File::create(&path)?;
+        let mut parts = vec![];
         if init_path(t).exists() {
-            out.write_all(&std::fs::read(init_path(t))?)?;
+            parts.push(init_path(t));
         }
-        for i in 0..pl.segments.len() {
-            out.write_all(&std::fs::read(seg_path((t, i)))?)?;
-        }
-        out.sync_all()?;
+        parts.extend((0..pl.segments.len()).map(|i| seg_path((t, i))));
+        work.push((parts, path.clone()));
         joined.push((*kind, path));
     }
+    crate::join::concat(work, progress).await?;
     std::fs::create_dir_all(&req.dir)?;
     let dest = naming::unique_path(&req.dir, &file_name);
     let result = if joined.len() == 1 && (video_ext == "mp4" || !can_remux) {
+        // A single MPEG-TS stream is saved as .ts (plays everywhere) unless ffmpeg can remux.
+        let dest = if video_ext == "mp4" { dest } else { dest.with_extension(video_ext) };
         move_file(&joined[0].1, &dest)?;
         dest
-    } else if can_remux {
-        let mut cmd = tokio::process::Command::new("ffmpeg");
-        cmd.args(["-y", "-loglevel", "error"]);
-        for (_, f) in &joined {
-            cmd.arg("-i").arg(f);
+    } else if joined.len() == 1 {
+        let (src, d2) = (joined[0].1.clone(), dest.clone());
+        let ok = tokio::process::Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-i"])
+            .arg(&src)
+            .args(["-c", "copy"])
+            .arg(&d2)
+            .status()
+            .await
+            .is_ok_and(|s| s.success());
+        if ok {
+            dest
+        } else {
+            let ts = dest.with_extension(video_ext);
+            move_file(&src, &ts)?;
+            ts
         }
-        if joined.len() > 1 {
-            cmd.args(["-map", "0:v:0?", "-map", "1:a:0"]);
-        }
-        cmd.args(["-c", "copy"]).arg(&dest);
-        if cmd.status().await.is_ok_and(|s| s.success()) { dest } else { keep_separate(&joined, &req.dir, &stem)? }
     } else {
-        keep_separate(&joined, &req.dir, &stem)?
+        // Separate audio rendition: RDM's own joiner (fMP4), else ffmpeg, else side by side.
+        crate::join::video_and_audio(joined[0].1.clone(), joined[1].1.clone(), dest, &stem, progress).await?
     };
     let total = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
     progress.send_modify(|p| {
@@ -485,23 +494,6 @@ pub async fn run(
     });
     let _ = tmp.remove();
     Ok(Some(result))
-}
-
-/// Without ffmpeg (or if muxing fails): keep tracks as separate files; returns the video path.
-fn keep_separate(tracks: &[(&str, PathBuf)], dir: &Path, stem: &str) -> Result<PathBuf> {
-    let mut video = None;
-    let single = tracks.len() == 1;
-    for (kind, f) in tracks {
-        let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("bin");
-        let ext = if *kind == "audio" && ext == "mp4" { "m4a" } else { ext };
-        let name = if single { format!("{stem}.{ext}") } else { format!("{stem}.{kind}.{ext}") };
-        let dest = naming::unique_path(dir, &name);
-        move_file(f, &dest)?;
-        if *kind == "video" || video.is_none() {
-            video = Some(dest);
-        }
-    }
-    video.ok_or_else(|| DownloadError::Other("nothing downloaded".into()))
 }
 
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {

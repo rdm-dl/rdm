@@ -243,6 +243,10 @@ impl Settings {
 
 /// Per-user data folder (`%APPDATA%\RDM`, `~/.local/share/rdm`, `~/Library/Application Support/RDM`).
 pub fn data_dir() -> PathBuf {
+    // A separate profile (tests, portable use): RDM_DATA_DIR=<folder>.
+    if let Some(d) = std::env::var_os("RDM_DATA_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d);
+    }
     let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     if cfg!(target_os = "linux") { base.join("rdm") } else { base.join("RDM") }
 }

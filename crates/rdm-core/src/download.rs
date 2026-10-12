@@ -105,6 +105,9 @@ pub struct Progress {
     pub resumable: bool,
     pub chunks: Vec<ChunkView>,
     pub final_path: Option<PathBuf>,
+    /// While joining pieces into the final file: how far it got (0..1).
+    #[serde(default)]
+    pub joining: Option<f32>,
 }
 
 impl Progress {
@@ -119,6 +122,7 @@ impl Progress {
             resumable: false,
             chunks: vec![],
             final_path: None,
+            joining: None,
         }
     }
     pub fn eta(&self) -> Option<Duration> {
@@ -1003,9 +1007,8 @@ async fn run_inner(
     };
     let tmp = ctx.tmp.clone();
     let block = cfg.join_block;
-    let path = tokio::task::spawn_blocking(move || assemble(&tmp, &map, total, &dest, block))
-        .await
-        .map_err(|e| DownloadError::Other(e.to_string()))??;
+    let watch_file = dest.clone();
+    let path = crate::join::with_progress(progress, total, crate::join::file_size(watch_file), move || assemble(&tmp, &map, total, &dest, block)).await?;
     let _ = ctx.tmp.clone().remove();
     progress.send_modify(|p| {
         p.downloaded = total;

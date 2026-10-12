@@ -209,7 +209,7 @@ impl App {
             Filter::All => "All downloads".into(),
             Filter::Category(Some(c)) => c.clone(),
             Filter::Category(None) => "General".into(),
-            Filter::Unfinished => "In progress".into(),
+            Filter::Unfinished => "Unfinished".into(),
             Filter::Finished => "Completed".into(),
             Filter::Queue(q) => self.manager.settings().queues.into_iter().find(|x| x.id == *q).map(|x| x.name).unwrap_or_default(),
         }
@@ -268,6 +268,7 @@ impl App {
         });
         let count = |f: &dyn Fn(&Item) -> bool| items.iter().filter(|i| f(i)).count();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_max_width(ui.available_width() - 10.0);
             theme::caption(ui, "Library");
             let mut nav = |ui: &mut egui::Ui, f: Filter, ic: &str, label: &str, n: usize| {
                 if theme::nav_item(ui, ic, label, Some(n), self.filter == f).clicked() {
@@ -276,7 +277,7 @@ impl App {
                 }
             };
             nav(ui, Filter::All, icon::SQUARES_FOUR, "All downloads", items.len());
-            nav(ui, Filter::Unfinished, icon::HOURGLASS_MEDIUM, "In progress", count(&|i| i.state != ItemState::Complete));
+            nav(ui, Filter::Unfinished, icon::HOURGLASS_MEDIUM, "Unfinished", count(&|i| i.state != ItemState::Complete));
             nav(ui, Filter::Finished, icon::CHECK_CIRCLE, "Completed", count(&|i| i.state == ItemState::Complete));
             theme::caption(ui, "Categories");
             for c in &s.categories {
@@ -311,7 +312,9 @@ impl App {
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(220.0);
                     if ui.button(theme::mi(icon::GLOBE, "Site grabber…")).clicked() {
-                        self.grabber = Some(Grabber::default());
+                        let mut g = Grabber::default();
+                        g.set_mirror_dir(self.manager.settings().download_dir.join("Websites"));
+                        self.grabber = Some(g);
                     }
                     if ui.button(theme::mi(icon::LIST_CHECKS, "Batch download…")).clicked() {
                         self.batch = Some(Batch::default());
@@ -366,30 +369,35 @@ impl App {
             });
         });
         ui.add_space(10.0);
-        // Action strip for the selection.
+        // Action strip for the selection. In a narrow window the buttons show icons only
+        // (the name appears on hover), so nothing gets cut off.
+        let compact = ui.available_width() < 760.0;
+        let bt = |ui: &mut egui::Ui, kind: Kind, ic: &str, label: &str, on: bool| {
+            if compact { theme::button(ui, kind, ic, "", on).on_hover_text(label) } else { theme::button(ui, kind, ic, label, on) }
+        };
         ui.horizontal(|ui| {
             let has_sel = !self.selected.is_empty();
-            if theme::button(ui, Kind::Ghost, icon::PLAY, "Resume", has_sel).clicked() {
+            if bt(ui, Kind::Ghost, icon::PLAY, "Resume", has_sel).clicked() {
                 for id in self.selected.clone() {
                     self.manager.start(id);
                 }
             }
-            if theme::button(ui, Kind::Ghost, icon::PAUSE, "Pause", has_sel).clicked() {
+            if bt(ui, Kind::Ghost, icon::PAUSE, "Pause", has_sel).clicked() {
                 for id in self.selected.clone() {
                     self.manager.stop(id);
                 }
             }
-            if theme::button(ui, Kind::Ghost, icon::STOP, "Pause all", true).clicked() {
+            if bt(ui, Kind::Ghost, icon::STOP, "Pause all", true).clicked() {
                 self.manager.stop_all();
             }
-            if theme::button(ui, Kind::Ghost, icon::ARROW_CLOCKWISE, "Resume all", true).clicked() {
+            if bt(ui, Kind::Ghost, icon::ARROW_CLOCKWISE, "Resume all", true).clicked() {
                 self.manager.start_all();
             }
             ui.add_space(6.0);
-            if theme::button(ui, Kind::Danger, icon::TRASH, "Delete", has_sel).clicked() {
+            if bt(ui, Kind::Danger, icon::TRASH, "Delete", has_sel).clicked() {
                 self.confirm_delete = Some(self.selected.iter().copied().collect());
             }
-            if theme::button(ui, Kind::Ghost, icon::BROOM, "Clear completed", true).clicked() {
+            if bt(ui, Kind::Ghost, icon::BROOM, "Clear completed", true).clicked() {
                 for i in self.manager.items() {
                     if i.state == ItemState::Complete {
                         self.manager.remove(i.id, false);
@@ -545,7 +553,8 @@ impl App {
     /// One download row. Returns the row response and an inline action, if clicked.
     fn row(&self, ui: &mut egui::Ui, it: &Item, h: f32) -> (egui::Response, Option<&'static str>) {
         let p = theme::palette(ui);
-        let width = ui.available_width();
+        // Leave a gutter so the cards never touch the scrollbar.
+        let width = (ui.available_width() - 14.0).max(240.0);
         let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
         ui.add_space(6.0);
         let selected = self.selected.contains(&it.id);
@@ -557,6 +566,7 @@ impl App {
         theme::file_tile(ui, tile, &it.file_name);
 
         let (status_text, color) = match &it.state {
+            ItemState::Running if it.joining.is_some() => ("Joining", p.accent),
             ItemState::Running => ("Downloading", p.accent),
             ItemState::Complete => ("Completed", p.success),
             ItemState::Failed(_) => ("Error", p.danger),
@@ -567,7 +577,9 @@ impl App {
 
         // Right side: actions, then speed/ETA, then pill.
         let mut act = None;
-        let right_w = 340.0;
+        // Narrow window: keep room for the name; speed/ETA move out of the row.
+        let narrow = width < 720.0;
+        let right_w = if narrow { 190.0 } else { 340.0 };
         let right = Rect::from_min_max(pos2(rect.right() - right_w, rect.top()), pos2(rect.right() - 10.0, rect.bottom()));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
         {
@@ -601,7 +613,7 @@ impl App {
             ui.add_space(8.0);
             theme::pill(ui, status_text, color);
             ui.add_space(10.0);
-            if it.state == ItemState::Running {
+            if it.state == ItemState::Running && it.joining.is_none() && !narrow {
                 ui.vertical(|ui| {
                     ui.add_space(14.0);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
@@ -624,13 +636,16 @@ impl App {
         let name_pos = pos2(left, rect.top() + 12.0);
         ui.painter().with_clip_rect(Rect::from_min_max(pos2(left, rect.top()), pos2(text_right, rect.bottom()))).galley(name_pos, name_galley, p.text);
         let sub = match &it.state {
+            ItemState::Running if it.joining.is_some() => {
+                format!("Putting the file together  ·  {:.0}%", it.joining.unwrap_or(0.0) * 100.0)
+            }
             ItemState::Running | ItemState::Stopped | ItemState::Queued => match it.total {
                 Some(t) => format!("{} of {}  ·  {:.0}%", util::size(it.downloaded), util::size(t), it.progress_fraction().unwrap_or(0.0) * 100.0),
                 None if it.downloaded > 0 => util::size(it.downloaded),
                 None => host(&it.request.url),
             },
             ItemState::Complete => format!("{}  ·  {}", it.total.map(util::size).unwrap_or_default(), util::date(it.finished)),
-            ItemState::Failed(e) => e.clone(),
+            ItemState::Failed(e) => util::friendly_error(e),
         };
         let sub_color = if matches!(it.state, ItemState::Failed(_)) { p.danger } else { p.text_dim };
         ui.painter()
@@ -639,7 +654,8 @@ impl App {
         if matches!(it.state, ItemState::Running | ItemState::Stopped | ItemState::Queued) && it.total.is_some() {
             let bar = Rect::from_min_size(pos2(left, rect.bottom() - 13.0), vec2((text_right - left).max(40.0), 5.0));
             let c = if it.state == ItemState::Running { p.accent } else { p.text_dim.gamma_multiply(0.7) };
-            theme::progress(ui, bar, it.progress_fraction().unwrap_or(0.0), c);
+            let f = it.joining.or(it.progress_fraction()).unwrap_or(0.0);
+            theme::progress(ui, bar, f, c);
         }
         let resp = resp.on_hover_text(&it.request.url);
         (resp, act)
@@ -668,6 +684,9 @@ impl App {
         egui::Window::new(RichText::new(&it.file_name).font(theme::semibold(15.0)))
             .id(egui::Id::new(("progress", id)))
             .open(&mut open)
+            .collapsible(false)
+            .pivot(Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .default_width(540.0)
             .resizable(true)
             .show(ctx, |ui| {

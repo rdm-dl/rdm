@@ -2,7 +2,8 @@
 
 use crate::settings::wildcard_match;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -25,6 +26,10 @@ pub struct GrabberProject {
     pub cookies: Option<String>,
     pub user_agent: String,
     pub respect_robots: bool,
+    /// Save an offline copy (pages, their stylesheets/scripts/images, and the collected
+    /// files) here, with links rewritten to the local copies.
+    #[serde(default)]
+    pub mirror_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for GrabberProject {
@@ -40,6 +45,7 @@ impl Default for GrabberProject {
             cookies: None,
             user_agent: format!("Mozilla/5.0 (compatible; RDM-Grabber/{})", env!("CARGO_PKG_VERSION")),
             respect_robots: true,
+            mirror_dir: None,
         }
     }
 }
@@ -73,6 +79,9 @@ pub struct GrabberStatus {
     pub current: String,
     pub done: bool,
     pub error: Option<String>,
+    /// Offline copy: files saved so far, and the start page's local file once finished.
+    pub mirrored: usize,
+    pub mirror_index: Option<std::path::PathBuf>,
 }
 
 /// Extract href/src values from HTML without a full parser.
@@ -221,6 +230,13 @@ pub async fn run(project: GrabberProject, status: watch::Sender<GrabberStatus>, 
     seen.lock().unwrap().insert(start.to_string());
     let mut files_seen = HashSet::new();
     let mut explored = 0;
+    // Offline copy: saved URL → local file, pages to rewrite, resources to fetch.
+    let mirror = project.mirror_dir.clone();
+    let mut saved: HashMap<String, PathBuf> = HashMap::new();
+    let mut pages: Vec<(Url, PathBuf)> = vec![];
+    let mut resources: Vec<Url> = vec![];
+    let mut resources_seen = HashSet::new();
+    let mut start_local: Option<PathBuf> = None;
 
     while let Some((page, level)) = queue.pop_front() {
         if *cancel.borrow() || explored >= project.max_pages {
@@ -245,11 +261,40 @@ pub async fn run(project: GrabberProject, status: watch::Sender<GrabberStatus>, 
         let final_url = resp.url().clone();
         let Ok(body) = resp.text().await else { continue };
         explored += 1;
+        if let Some(root) = &mirror {
+            let local = crate::mirror::local_path(root, &final_url, true);
+            if let Some(dir) = local.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if std::fs::write(&local, &body).is_ok() {
+                for u in [&page, &final_url] {
+                    let mut k = u.clone();
+                    k.set_fragment(None);
+                    saved.insert(k.to_string(), local.clone());
+                }
+                if start_local.is_none() {
+                    start_local = Some(local.clone());
+                }
+                pages.push((final_url.clone(), local));
+                status.send_modify(|s| s.mirrored += 1);
+            }
+            // What the page needs to display: stylesheets, scripts, images (any host).
+            for r in crate::mirror::scan_attrs(&body).iter().filter(|r| r.is_resource()) {
+                if let Some(u) = crate::mirror::resolve(&final_url, &body[r.start..r.end]) {
+                    if resources_seen.insert(u.to_string()) {
+                        resources.push(u);
+                    }
+                }
+            }
+        }
         for link in extract_links(&body, &final_url) {
             if matches_any(&project.include, &link) {
                 if files_seen.insert(link.to_string()) {
                     let f = FoundFile { url: link.to_string(), referer: final_url.to_string(), size: None };
                     status.send_modify(|s| s.files.push(f));
+                    if mirror.is_some() && resources_seen.insert(link.to_string()) {
+                        resources.push(link.clone());
+                    }
                 }
                 continue;
             }
@@ -262,10 +307,85 @@ pub async fn run(project: GrabberProject, status: watch::Sender<GrabberStatus>, 
             s.pages_queued = queue.len();
         });
     }
+    let cancelled = *cancel.borrow();
+    if let (Some(root), false) = (&mirror, cancelled) {
+        save_offline_copy(&client, root, resources, &mut saved, &pages, &status, &cancel).await;
+        status.send_modify(|s| s.mirror_index = start_local.clone());
+    }
     status.send_modify(|s| {
         s.done = true;
         s.current.clear();
     });
+}
+
+/// Fetch the pages' resources (and what their stylesheets reference), then rewrite links
+/// in every saved page and stylesheet to the local copies.
+async fn save_offline_copy(
+    client: &reqwest::Client,
+    root: &std::path::Path,
+    resources: Vec<Url>,
+    saved: &mut HashMap<String, PathBuf>,
+    pages: &[(Url, PathBuf)],
+    status: &watch::Sender<GrabberStatus>,
+    cancel: &watch::Receiver<bool>,
+) {
+    use futures_util::stream::{self, StreamExt};
+    let mut sheets: Vec<(Url, PathBuf)> = vec![];
+    let mut pending = resources;
+    let mut seen: HashSet<String> = pending.iter().map(|u| u.to_string()).collect();
+    // Two rounds: page resources, then what stylesheets pull in (images, fonts, imports).
+    for _round in 0..2 {
+        if pending.is_empty() || *cancel.borrow() {
+            break;
+        }
+        let batch = std::mem::take(&mut pending);
+        let results: Vec<Option<(Url, PathBuf, bool)>> = stream::iter(batch)
+            .map(|u| async move {
+                status.send_modify(|s| s.current = u.to_string());
+                let resp = client.get(u.clone()).send().await.ok().filter(|r| r.status().is_success())?;
+                let css = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|t| t.contains("css"))
+                    || u.path().to_ascii_lowercase().ends_with(".css");
+                let bytes = resp.bytes().await.ok()?;
+                let local = crate::mirror::local_path(root, &u, false);
+                std::fs::create_dir_all(local.parent()?).ok()?;
+                std::fs::write(&local, &bytes).ok()?;
+                status.send_modify(|s| s.mirrored += 1);
+                Some((u, local, css))
+            })
+            .buffer_unordered(6)
+            .collect()
+            .await;
+        for (u, local, css) in results.into_iter().flatten() {
+            saved.insert(u.to_string(), local.clone());
+            if css {
+                if let Ok(text) = std::fs::read_to_string(&local) {
+                    for (s, e) in crate::mirror::css_urls(&text) {
+                        if let Some(r) = crate::mirror::resolve(&u, &text[s..e]) {
+                            if seen.insert(r.to_string()) {
+                                pending.push(r);
+                            }
+                        }
+                    }
+                }
+                sheets.push((u, local));
+            }
+        }
+    }
+    status.send_modify(|s| s.current = "Rewriting links for offline browsing".into());
+    for (u, file) in pages {
+        if let Ok(html) = std::fs::read_to_string(file) {
+            let _ = std::fs::write(file, crate::mirror::rewrite_html(&html, u, file, saved));
+        }
+    }
+    for (u, file) in &sheets {
+        if let Ok(css) = std::fs::read_to_string(file) {
+            let _ = std::fs::write(file, crate::mirror::rewrite_css(&css, u, file, saved));
+        }
+    }
 }
 
 #[cfg(test)]

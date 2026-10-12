@@ -11,7 +11,7 @@ use crate::limiter::Limiter;
 use crate::mux::{self, Container};
 use crate::naming;
 use crate::storage::TempDir;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -34,26 +34,6 @@ pub fn pair_url(video: &str, audio: &str) -> String {
     let video = video.split('#').next().unwrap_or(video);
     let enc = percent_encoding::utf8_percent_encode(audio, percent_encoding::NON_ALPHANUMERIC);
     format!("{video}#{KEY}{enc}")
-}
-
-fn ffmpeg_available() -> bool {
-    std::process::Command::new("ffmpeg").arg("-version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
-}
-
-fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    if std::fs::rename(from, to).is_err() {
-        std::fs::copy(from, to)?;
-        std::fs::remove_file(from)?;
-    }
-    Ok(())
-}
-
-fn ext_of(p: &Path, kind: Option<Container>, audio: bool) -> String {
-    match kind {
-        Some(Container::Mp4) => (if audio { "m4a" } else { "mp4" }).into(),
-        Some(Container::WebM) => "webm".into(),
-        None => p.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_string(),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -152,42 +132,12 @@ pub async fn run(
 
     progress.send_modify(|p| p.status = Status::Assembling);
     std::fs::create_dir_all(&req.dir)?;
-    let (vk, ak) = (mux::sniff(&vpath)?, mux::sniff(&apath)?);
-    let out_ext = match vk {
+    let out_ext = match mux::sniff(&vpath)? {
         Some(Container::WebM) => "webm",
         _ => "mp4",
     };
     let dest = naming::unique_path(&req.dir, &format!("{stem}.{out_ext}"));
-    let (v2, a2, d2) = (vpath.clone(), apath.clone(), dest.clone());
-    let merged = tokio::task::spawn_blocking(move || mux::merge(&v2, &a2, &d2)).await.map_err(join_err)?;
-    let result = match merged {
-        Ok(true) => dest,
-        _ => {
-            let _ = std::fs::remove_file(&dest);
-            let mkv = naming::unique_path(&req.dir, &format!("{stem}.mkv"));
-            let ok = ffmpeg_available()
-                && tokio::process::Command::new("ffmpeg")
-                    .args(["-y", "-loglevel", "error", "-i"])
-                    .arg(&vpath)
-                    .arg("-i")
-                    .arg(&apath)
-                    .args(["-map", "0:v:0", "-map", "1:a:0", "-c", "copy"])
-                    .arg(&mkv)
-                    .status()
-                    .await
-                    .is_ok_and(|s| s.success());
-            if ok {
-                mkv
-            } else {
-                // Keep both parts next to each other.
-                let vdest = naming::unique_path(&req.dir, &format!("{stem}.video.{}", ext_of(&vpath, vk, false)));
-                let adest = naming::unique_path(&req.dir, &format!("{stem}.audio.{}", ext_of(&apath, ak, true)));
-                move_file(&vpath, &vdest)?;
-                move_file(&apath, &adest)?;
-                vdest
-            }
-        }
-    };
+    let result = crate::join::video_and_audio(vpath, apath, dest, &stem, progress).await?;
     let size = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
     progress.send_modify(|p| {
         p.file_name = result.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

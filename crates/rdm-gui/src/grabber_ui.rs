@@ -13,6 +13,9 @@ pub struct Grabber {
     project: GrabberProject,
     preset: String,
     custom: String,
+    /// Save an offline copy of the explored pages.
+    mirror: bool,
+    mirror_dir: String,
     status: Option<watch::Receiver<GrabberStatus>>,
     cancel: Option<watch::Sender<bool>>,
     unchecked: HashSet<String>,
@@ -24,10 +27,18 @@ impl Default for Grabber {
             project: GrabberProject::default(),
             preset: "images".into(),
             custom: "*.zip *.pdf".into(),
+            mirror: false,
+            mirror_dir: String::new(),
             status: None,
             cancel: None,
             unchecked: HashSet::new(),
         }
+    }
+}
+
+impl Grabber {
+    pub fn set_mirror_dir(&mut self, dir: std::path::PathBuf) {
+        self.mirror_dir = dir.display().to_string();
     }
 }
 
@@ -36,7 +47,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let mut close = false;
     let mut add: Option<bool> = None;
     let mut start = false;
-    egui::Window::new("Site grabber").default_size([640.0, 520.0]).show(ctx, |ui| {
+    egui::Window::new("Site grabber").default_size([640.0, 520.0]).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         let p = theme::palette(ui);
         let running = g.status.as_ref().is_some_and(|s| !s.borrow().done);
         ui.add_enabled_ui(!running, |ui| {
@@ -68,6 +79,17 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 ui.checkbox(&mut g.project.same_path, "Stay in this folder");
                 ui.checkbox(&mut g.project.respect_robots, "Respect robots.txt");
             });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut g.mirror, "Save an offline copy of the pages to");
+                ui.add_enabled_ui(g.mirror, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut g.mirror_dir).desired_width(300.0));
+                    if ui.button("…").clicked() {
+                        if let Some(d) = rfd::FileDialog::new().set_directory(&g.mirror_dir).pick_folder() {
+                            g.mirror_dir = d.display().to_string();
+                        }
+                    }
+                });
+            });
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -85,10 +107,21 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             let s = st.borrow().clone();
             ui.add_space(6.0);
             let finished = if s.done { " · finished" } else { "" };
+            let saved = if s.mirrored > 0 { format!(" · {} saved offline", s.mirrored) } else { String::new() };
             ui.label(
-                RichText::new(format!("{} pages explored · {} queued · {} files found{finished}", s.pages_explored, s.pages_queued, s.files.len()))
+                RichText::new(format!("{} pages explored · {} queued · {} files found{saved}{finished}", s.pages_explored, s.pages_queued, s.files.len()))
                     .color(p.text_dim),
             );
+            if let Some(index) = &s.mirror_index {
+                ui.horizontal(|ui| {
+                    if theme::button(ui, Kind::Primary, icon::GLOBE, "Open offline copy", true).clicked() {
+                        crate::util::open_file(index);
+                    }
+                    if theme::button(ui, Kind::Ghost, icon::FOLDER_OPEN, "Show folder", true).clicked() {
+                        crate::util::open_folder(index);
+                    }
+                });
+            }
             if let Some(e) = &s.error {
                 ui.colored_label(p.danger, e);
             }
@@ -130,6 +163,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         } else {
             grabber::preset(&g.preset)
         };
+        g.project.mirror_dir = (g.mirror && !g.mirror_dir.trim().is_empty()).then(|| std::path::PathBuf::from(g.mirror_dir.trim()));
         let (tx, rx) = watch::channel(GrabberStatus::default());
         let (cancel_tx, cancel_rx) = watch::channel(false);
         g.status = Some(rx);

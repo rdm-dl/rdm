@@ -52,6 +52,9 @@ pub struct Item {
     pub connections: usize,
     #[serde(skip)]
     pub chunks: Vec<ChunkView>,
+    /// Joining pieces into the final file: progress (0..1).
+    #[serde(skip)]
+    pub joining: Option<f32>,
 }
 
 impl Item {
@@ -252,6 +255,7 @@ impl Manager {
                 speed: 0.0,
                 connections: 0,
                 chunks: vec![],
+                joining: None,
                 request: req,
             };
             st.items.insert(id, item);
@@ -480,6 +484,7 @@ impl Manager {
                 }
                 it.speed = 0.0;
                 it.connections = 0;
+                it.joining = None;
                 match res {
                     Ok(Some(path)) => {
                         it.state = ItemState::Complete;
@@ -764,6 +769,7 @@ fn apply_progress(it: &mut Item, p: &Progress) {
     it.connections = p.connections;
     it.resumable = p.resumable;
     it.chunks = p.chunks.clone();
+    it.joining = if p.status == Status::Assembling { Some(p.joining.unwrap_or(0.0)) } else { None };
 }
 
 fn run_virus_scan(cmd: &str, path: &Path) {

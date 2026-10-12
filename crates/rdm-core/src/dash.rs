@@ -6,7 +6,6 @@ use crate::limiter::Limiter;
 use crate::naming;
 use crate::storage::TempDir;
 use reqwest::Client;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -264,15 +263,6 @@ async fn fetch(client: &Client, s: &SegRef, req: &DownloadRequest) -> Result<Vec
     Ok(r.bytes().await?.to_vec())
 }
 
-fn ffmpeg_available() -> bool {
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     req: &DownloadRequest,
@@ -396,39 +386,30 @@ pub async fn run(
     }
 
     progress.send_modify(|p| p.status = Status::Assembling);
-    // Concatenate each track (init + segments = valid fragmented MP4 / WebM).
+    // Concatenate each track (init + segments = valid fragmented MP4 / WebM), off the
+    // async workers, then put video and audio together.
+    let mut tracks = vec![];
     let mut track_files = vec![];
     for (ti, (kind, t)) in chosen.iter().enumerate() {
         let out = tmp.path.join(format!("{kind}.bin"));
-        let mut f = std::fs::File::create(&out)?;
+        let mut parts = vec![];
         if t.init.is_some() {
-            f.write_all(&std::fs::read(path_of(ti, usize::MAX))?)?;
+            parts.push(path_of(ti, usize::MAX));
         }
-        for si in 0..t.segments.len() {
-            f.write_all(&std::fs::read(path_of(ti, si))?)?;
-        }
-        f.sync_all()?;
+        parts.extend((0..t.segments.len()).map(|si| path_of(ti, si)));
+        tracks.push((parts, out.clone()));
         track_files.push((kind.to_string(), out));
     }
+    crate::join::concat(tracks, progress).await?;
     std::fs::create_dir_all(&req.dir)?;
     let dest = naming::unique_path(&req.dir, &file_name);
     let result = if track_files.len() == 1 {
         move_file(&track_files[0].1, &dest)?;
         dest
-    } else if ffmpeg_available() {
-        let mut cmd = tokio::process::Command::new("ffmpeg");
-        cmd.args(["-y", "-loglevel", "error"]);
-        for (_, f) in &track_files {
-            cmd.arg("-i").arg(f);
-        }
-        cmd.args(["-c", "copy"]).arg(&dest);
-        if cmd.status().await.is_ok_and(|s| s.success()) {
-            dest
-        } else {
-            keep_separate(&track_files, &req.dir, &stem)?
-        }
     } else {
-        keep_separate(&track_files, &req.dir, &stem)?
+        let video = track_files.iter().find(|(k, _)| k == "video").map(|(_, f)| f.clone()).unwrap_or_else(|| track_files[0].1.clone());
+        let audio = track_files.iter().find(|(k, _)| k == "audio").map(|(_, f)| f.clone()).unwrap_or_else(|| track_files[1].1.clone());
+        crate::join::video_and_audio(video, audio, dest, &stem, progress).await?
     };
     let size = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
     progress.send_modify(|p| {
@@ -437,20 +418,6 @@ pub async fn run(
     });
     let _ = tmp.remove();
     Ok(Some(result))
-}
-
-/// Without ffmpeg: save `name.video.mp4` and `name.audio.m4a`; return the video path.
-fn keep_separate(tracks: &[(String, PathBuf)], dir: &Path, stem: &str) -> Result<PathBuf> {
-    let mut video = None;
-    for (kind, f) in tracks {
-        let name = if kind == "video" { format!("{stem}.video.mp4") } else { format!("{stem}.audio.m4a") };
-        let dest = naming::unique_path(dir, &name);
-        move_file(f, &dest)?;
-        if kind == "video" || video.is_none() {
-            video = Some(dest);
-        }
-    }
-    video.ok_or_else(|| DownloadError::Other("nothing downloaded".into()))
 }
 
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {

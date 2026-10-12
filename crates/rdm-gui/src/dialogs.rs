@@ -256,7 +256,7 @@ fn add_url(app: &mut App, ctx: &egui::Context) {
     let Some(d) = app.add_url.as_mut() else { return };
     let mut close = false;
     let mut ok = false;
-    egui::Window::new("Enter new address to download").collapsible(false).resizable(false).show(ctx, |ui| {
+    egui::Window::new("Enter new address to download").resizable(false).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label("Address:");
             let r = ui.add(egui::TextEdit::singleline(&mut d.url).desired_width(420.0));
@@ -316,7 +316,7 @@ fn file_info(app: &mut App, ctx: &egui::Context) {
         }
     }
     let mut result: Option<Option<bool>> = None; // Some(Some(true)) start now, Some(Some(false)) later, Some(None) cancel
-    egui::Window::new("Download file info").collapsible(false).resizable(false).default_width(560.0).show(ctx, |ui| {
+    egui::Window::new("Download file info").resizable(false).default_width(560.0).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         egui::Grid::new("fi").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             ui.label("URL");
             ui.add(egui::Label::new(&d.req.url).truncate());
@@ -416,7 +416,7 @@ fn batch(app: &mut App, ctx: &egui::Context) {
     let Some(b) = app.batch.as_mut() else { return };
     let mut close = false;
     let mut add: Option<bool> = None;
-    egui::Window::new("Batch download").default_width(600.0).show(ctx, |ui| {
+    egui::Window::new("Batch download").default_width(600.0).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.label("Address with a * wildcard, e.g. https://example.com/images/img*.jpg");
         let mut changed = ui.add(egui::TextEdit::singleline(&mut b.template).desired_width(560.0)).changed();
         ui.horizontal(|ui| {
@@ -471,7 +471,7 @@ fn batch(app: &mut App, ctx: &egui::Context) {
 fn speed_limit(app: &mut App, ctx: &egui::Context) {
     let Some(d) = app.speed_limit.as_mut() else { return };
     let mut close = false;
-    egui::Window::new("Speed limiter").collapsible(false).resizable(false).show(ctx, |ui| {
+    egui::Window::new("Speed limiter").resizable(false).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.checkbox(&mut d.on, "Limit total download speed");
         ui.add_enabled(d.on, egui::DragValue::new(&mut d.kb).range(1..=10_000_000).suffix(" KB/s"));
         ui.horizontal(|ui| {
@@ -493,7 +493,7 @@ fn options(app: &mut App, ctx: &egui::Context) {
     let Some(o) = app.options.as_mut() else { return };
     let mut close = false;
     let mut apply = false;
-    egui::Window::new("Options").default_size([640.0, 460.0]).show(ctx, |ui| {
+    egui::Window::new("Options").default_size([640.0, 460.0]).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.horizontal_wrapped(|ui| {
             for (t, n) in [
                 (Tab::General, "General"),
@@ -730,7 +730,7 @@ fn scheduler(app: &mut App, ctx: &egui::Context) {
     let Some(sc) = app.scheduler.as_mut() else { return };
     let mut close = false;
     let mut save = false;
-    egui::Window::new("Scheduler").default_size([620.0, 420.0]).show(ctx, |ui| {
+    egui::Window::new("Scheduler").default_size([620.0, 420.0]).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(170.0);
