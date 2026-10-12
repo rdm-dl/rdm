@@ -29,6 +29,8 @@ pub struct MediaOffer {
 }
 
 pub struct App {
+    /// The app icon, drawn in the sidebar header.
+    logo: Option<egui::TextureHandle>,
     pub rt: tokio::runtime::Handle,
     pub manager: Manager,
     ui_rx: mpsc::UnboundedReceiver<UiRequest>,
@@ -77,7 +79,12 @@ impl App {
         initial: Vec<DownloadRequest>,
     ) -> Self {
         let events = manager.subscribe();
+        let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo-128.png")).ok().map(|icon| {
+            let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+            ctx.load_texture("rdm-logo", img, egui::TextureOptions::LINEAR)
+        });
         let mut app = Self {
+            logo,
             rt,
             manager,
             ui_rx,
@@ -222,17 +229,26 @@ impl App {
         ui.add_space(16.0);
         // Brand: glowing logo tile with a soft highlight, name and tagline centred on it.
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
-        let logo = Rect::from_min_size(pos2(row.left() + 6.0, row.center().y - 21.0), vec2(42.0, 42.0));
-        let radius = CornerRadius::same(13);
+        let logo = Rect::from_min_size(pos2(row.left() + 2.0, row.center().y - 25.0), vec2(50.0, 50.0));
         let painter = ui.painter();
-        painter.add(egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: p.accent.gamma_multiply(0.45) }.as_shape(logo, radius));
-        painter.rect_filled(logo, radius, p.accent);
-        let top = Rect::from_min_max(logo.min, pos2(logo.max.x, logo.center().y));
-        painter.rect_filled(top, CornerRadius { nw: 13, ne: 13, sw: 0, se: 0 }, Color32::from_white_alpha(30));
-        painter.rect_stroke(logo, radius, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Inside);
-        painter.text(logo.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, icon::DOWNLOAD_SIMPLE, theme::icon_font(22.0), Color32::WHITE);
-        let tx = logo.right() + 13.0;
-        painter.text(pos2(tx, row.center().y + 1.0), Align2::LEFT_BOTTOM, "RDM", theme::semibold(20.0), p.text);
+        match &self.logo {
+            // The app icon (it carries its own glow).
+            Some(tex) => {
+                painter.image(tex.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                let radius = CornerRadius::same(13);
+                painter.rect_filled(logo.shrink(4.0), radius, p.accent);
+                painter.text(logo.center(), Align2::CENTER_CENTER, icon::DOWNLOAD_SIMPLE, theme::icon_font(22.0), Color32::WHITE);
+            }
+        }
+        // "RD" + "M" in the accent blue, as in the logo artwork.
+        let tx = logo.right() + 10.0;
+        let mut job = egui::text::LayoutJob::default();
+        job.append("RD", 0.0, egui::TextFormat { font_id: theme::semibold(21.0), color: p.text, ..Default::default() });
+        job.append("M", 0.0, egui::TextFormat { font_id: theme::semibold(21.0), color: p.accent, ..Default::default() });
+        let galley = painter.layout_job(job);
+        painter.galley(pos2(tx, row.center().y + 1.0 - galley.size().y), galley, p.text);
         painter.text(pos2(tx + 1.0, row.center().y + 4.0), Align2::LEFT_TOP, "Download Manager", FontId::proportional(11.5), p.text_dim);
         ui.add_space(18.0);
         ui.horizontal(|ui| {
