@@ -83,6 +83,12 @@ async fn connect() -> Option<Client> {
 
 async fn handle(client: &mut Option<Client>, msg: Value) -> Value {
     let kind = msg.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+    if kind == "diag" {
+        let dir = data_dir().join("diagnostics");
+        let ok = std::fs::create_dir_all(&dir).is_ok()
+            && std::fs::write(dir.join("extension.json"), serde_json::to_vec_pretty(msg.get("data").unwrap_or(&Value::Null)).unwrap_or_default()).is_ok();
+        return json!({"type": if ok { "ok" } else { "error" }});
+    }
     if client.is_none() {
         *client = connect().await;
     }

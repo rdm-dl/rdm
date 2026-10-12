@@ -489,6 +489,52 @@ async function downloadMedia(msg, tab) {
 // player has requested them (switch quality in the player to add more).
 
 const yt = new Map(); // tabId -> Map(videoId -> info)
+const diagLog = []; // recent events, for diagnostics
+
+function diag(event, detail) {
+  diagLog.push({ t: new Date().toISOString().slice(11, 23), event, ...detail });
+  if (diagLog.length > 300) diagLog.splice(0, diagLog.length - 300);
+  scheduleDiag();
+}
+
+let diagTimer = 0;
+function scheduleDiag() {
+  clearTimeout(diagTimer);
+  diagTimer = setTimeout(writeDiag, 1500);
+}
+
+async function writeDiag() {
+  const tabs = {};
+  for (const [tabId, videos] of yt) {
+    tabs[tabId] = [...videos.values()].map((v) => ({
+      videoId: v.videoId,
+      title: v.title,
+      formats: v.formats.length,
+      withUrl: v.formats.filter((f) => f.url).length,
+      withCipher: v.formats.filter((f) => f.cipher).length,
+      sabr: v.sabr,
+      sabrSeen: v.sabrSeen,
+      hls: !!v.hls,
+      observed: Object.keys(v.observed),
+      nMapped: Object.keys(v.nMap).length,
+      pot: !!v.pot,
+      itags: v.formats.map((f) => `${f.itag}:${f.mime.split(";")[0]}:${f.h || ""}${f.url ? ":url" : ""}${f.cipher ? ":cipher" : ""}`),
+      entries: ytEntries(v).map((e) => e.kind === "yt" ? `${e.label} ${e.container}` : `note: ${e.text}`),
+      sabrUrlKeys: v.sabrUrl ? [...new URL(v.sabrUrl).searchParams.keys()].join(",") : "",
+      sabrReq: v.sabrReq ? { url: v.sabrReq.url, body: v.sabrReq.body } : null,
+      ustreamer: v.ustreamer || "",
+      clientVersion: v.clientVersion || "",
+      formatsFull: v.formats.map((f) => ({ itag: f.itag, mime: f.mime, h: f.h, fps: f.fps, clen: f.clen, lmt: f.lmt, xtags: f.xtags, durMs: f.durMs, audioId: f.audioId, audioDefault: f.audioDefault })),
+    }));
+  }
+  const pending = {};
+  for (const [tabId, list] of ytPending) pending[tabId] = list.length;
+  await send({
+    type: "diag",
+    data: { version: api.runtime.getManifest().version, at: new Date().toISOString(), connected, tabs, pending, sabrSamples, media: Object.fromEntries([...media].map(([k, v]) => [k, [...v.keys()]])), log: diagLog },
+  });
+}
+
 const YT_DROP = ["range", "rn", "rbuf", "alr", "ump", "srfvp", "cpn"];
 
 function ytVideos(tabId) {
@@ -508,7 +554,30 @@ function cleanStreamUrl(u) {
   }
 }
 
+const sabrSamples = []; // first response samples, for diagnostics
+
+// The player's latest streaming request: its URL carries the unlocked n/sig values, its
+// body the session (PO token, playback cookie). Kept per video as the template to replay.
+function ytOnSabr(tabId, data) {
+  if (tabId == null || tabId < 0 || !data || !data.url) return;
+  const videos = yt.get(tabId);
+  if (!videos || !videos.size) return;
+  const v = [...videos.values()].sort((a, b) => b.found - a.found)[0];
+  const first = !v.sabrReq;
+  v.sabrReq = { url: data.url, body: data.body, t: Date.now() };
+  v.sabrSeen = true;
+  try {
+    const n = new URL(data.url).searchParams.get("n");
+    const orig = v.sabrUrl ? new URL(v.sabrUrl).searchParams.get("n") : "";
+    if (n && orig && n !== orig) v.nMap[orig] = n;
+  } catch {}
+  diag("sabr-request", { tabId, videoId: v.videoId, bodyBytes: Math.round(((data.body || "").length * 3) / 4) });
+  saveState();
+  if (first) notifyTab(tabId);
+}
+
 function ytOnPlayer(tabId, data) {
+  diag("player-data", { tabId, videoId: data && data.videoId, formats: data && data.formats && data.formats.length, sabr: data && data.sabr });
   if (tabId == null || tabId < 0 || !data || !data.videoId || !Array.isArray(data.formats)) return;
   const videos = ytVideos(tabId);
   const prev = videos.get(data.videoId);
@@ -518,6 +587,7 @@ function ytOnPlayer(tabId, data) {
     nMap: prev ? prev.nMap : {}, // original n -> unlocked n
     pot: prev ? prev.pot : "",
     sabrSeen: prev ? prev.sabrSeen : false,
+    sabrReq: prev ? prev.sabrReq : null,
     found: Date.now(),
   };
   videos.set(data.videoId, info);
@@ -542,6 +612,7 @@ function ytOnRequest(d, replay) {
   const q = u.searchParams;
   const itag = +q.get("itag");
   const clen = +q.get("clen") || 0;
+  if (!replay) diag("videoplayback", { tabId: d.tabId, method: d.method, type: d.type, itag, clen, sabr: q.get("sabr"), ump: q.get("ump"), keys: [...q.keys()].join(",").slice(0, 300) });
   // Which video: match the content length against the formats the player listed.
   let target = null;
   if (videos) {
@@ -749,7 +820,12 @@ api.runtime.onMessage.addListener((msg, sender, respond) => {
         respond({ connected, enabled: settings.enabled, show_button: b.show_button, blocked_hosts: b.blocked_hosts, media: mediaList(msg.tabId, msg.pageUrl) });
         break;
       }
+      case "content-hello":
+        diag("content", { tabId: sender.tab?.id, frame: sender.frameId, url: (msg.url || "").slice(0, 120), docHook: msg.docHook });
+        respond({ ok: true });
+        break;
       case "page-media":
+        diag("menu-open", { tabId: sender.tab?.id, pageUrl: (msg.pageUrl || "").slice(0, 120) });
         await freshSettings();
         respond({ connected, media: mediaList(sender.tab?.id, msg.pageUrl || sender.tab?.url) });
         break;
@@ -778,6 +854,15 @@ api.runtime.onMessage.addListener((msg, sender, respond) => {
       }
       case "keys":
         lastKeys = { keys: msg.keys || [], t: Date.now() };
+        respond({ ok: true });
+        break;
+      case "yt-sabr":
+        ytOnSabr(sender.tab?.id, msg.data);
+        respond({ ok: true });
+        break;
+      case "yt-sabr-sample":
+        if (sabrSamples.length < 3) sabrSamples.push({ ...msg.data, tabId: sender.tab?.id });
+        diag("sabr-sample", { tabId: sender.tab?.id, status: msg.data && msg.data.status, bytes: msg.data && msg.data.data ? msg.data.data.length : 0 });
         respond({ ok: true });
         break;
       case "yt-player":

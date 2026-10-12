@@ -123,6 +123,8 @@ struct Inner {
     events: broadcast::Sender<Event>,
     limiter: Arc<Limiter>,
     data_dir: PathBuf,
+    /// The runtime downloads run on; methods may be called from threads outside it (the UI).
+    rt: tokio::runtime::Handle,
 }
 
 #[derive(Clone)]
@@ -170,6 +172,7 @@ impl Manager {
                 events,
                 limiter,
                 data_dir: data_dir.to_path_buf(),
+                rt: tokio::runtime::Handle::current(),
             }),
         };
         let bg = m.clone();
@@ -268,6 +271,7 @@ impl Manager {
 
     /// Start (or resume) a download immediately.
     pub fn start(&self, id: ItemId) {
+        let _rt = self.inner.rt.enter();
         let mut st = self.inner.state.lock().unwrap();
         if st.running.contains_key(&id) || st.quota_until.is_some() {
             return;

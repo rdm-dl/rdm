@@ -17,6 +17,20 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 fn main() -> eframe::Result<()> {
+    // Any panic is written to <data dir>/crash.log (the window has no console).
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        let msg = format!("[{}] RDM {} crashed: {info}
+{bt}
+
+", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), env!("CARGO_PKG_VERSION"));
+        eprintln!("{msg}");
+        let path = data_dir().join("crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            let _ = f.write_all(msg.as_bytes());
+        }
+    }));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let minimized = args.iter().any(|a| a == "--minimized");
     let urls: Vec<String> = args.iter().filter(|a| a.contains("://")).cloned().collect();

@@ -432,6 +432,14 @@
       send({ type: "yt-player", data: d.yt });
       return;
     }
+    if (d.sabr && typeof d.sabr === "object") {
+      send({ type: "yt-sabr", data: d.sabr });
+      return;
+    }
+    if (d.sabrSample && typeof d.sabrSample === "object") {
+      send({ type: "yt-sabr-sample", data: d.sabrSample });
+      return;
+    }
     if (typeof d.url !== "string") return;
     send({ type: "page-request", url: d.url, mime: String(d.type || ""), size: +d.size || 0 });
   });
@@ -445,4 +453,7 @@
     if (msg.type === "rdm-settings") refreshSettings();
   });
   refreshSettings();
+  if (window.top === window && /(^|\.)youtube\.com$/.test(location.hostname)) {
+    setTimeout(() => send({ type: "content-hello", url: location.href, docHook: document.documentElement.dataset.rdmHook === "1" }), 3000);
+  }
 })();
