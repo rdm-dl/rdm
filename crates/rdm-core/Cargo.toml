@@ -1,0 +1,21 @@
+[package]
+name = "rdm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Download engine: segmented multi-connection HTTP downloads with resume"
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
