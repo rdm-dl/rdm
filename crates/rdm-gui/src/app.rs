@@ -29,8 +29,8 @@ pub struct MediaOffer {
 }
 
 pub struct App {
-    /// The app icon, drawn in the sidebar header.
-    logo: Option<egui::TextureHandle>,
+    /// The app icon for the sidebar header, at the pixel size of the current display scale.
+    logo: Option<(u32, egui::TextureHandle)>,
     pub rt: tokio::runtime::Handle,
     pub manager: Manager,
     ui_rx: mpsc::UnboundedReceiver<UiRequest>,
@@ -79,10 +79,8 @@ impl App {
         initial: Vec<DownloadRequest>,
     ) -> Self {
         let events = manager.subscribe();
-        let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo-128.png")).ok().map(|icon| {
-            let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-            ctx.load_texture("rdm-logo", img, egui::TextureOptions::LINEAR)
-        });
+        let _ = ctx;
+        let logo = None;
         let mut app = Self {
             logo,
             rt,
@@ -229,11 +227,20 @@ impl App {
         ui.add_space(16.0);
         // Brand: glowing logo tile with a soft highlight, name and tagline centred on it.
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
-        let logo = Rect::from_min_size(pos2(row.left() + 2.0, row.center().y - 25.0), vec2(50.0, 50.0));
+        // The icon is pre-rendered at each display scale and drawn 1:1 on the pixel grid,
+        // so it is never resampled on screen.
+        let ppp = ui.ctx().pixels_per_point();
+        let px = logo_pixels(50.0 * ppp);
+        if self.logo.as_ref().map(|(s, _)| *s) != Some(px) {
+            self.logo = load_logo(ui.ctx(), px).map(|t| (px, t));
+        }
+        let side = px as f32 / ppp;
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let logo = Rect::from_min_size(pos2(snap(row.left() + 2.0), snap(row.center().y - side / 2.0)), vec2(side, side));
         let painter = ui.painter();
         match &self.logo {
             // The app icon (it carries its own glow).
-            Some(tex) => {
+            Some((_, tex)) => {
                 painter.image(tex.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
             None => {
@@ -996,4 +1003,27 @@ impl eframe::App for App {
         self.popups(&ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
     }
+}
+
+/// Pre-rendered sizes of the sidebar icon (50 points at 100%–300% display scale).
+const LOGOS: &[(u32, &[u8])] = &[
+    (50, include_bytes!("../assets/logo-50.png")),
+    (63, include_bytes!("../assets/logo-63.png")),
+    (75, include_bytes!("../assets/logo-75.png")),
+    (88, include_bytes!("../assets/logo-88.png")),
+    (100, include_bytes!("../assets/logo-100.png")),
+    (125, include_bytes!("../assets/logo-125.png")),
+    (150, include_bytes!("../assets/logo-150.png")),
+];
+
+/// The pre-rendered size closest to `want` pixels.
+fn logo_pixels(want: f32) -> u32 {
+    LOGOS.iter().map(|(s, _)| *s).min_by(|a, b| (*a as f32 - want).abs().total_cmp(&(*b as f32 - want).abs())).unwrap_or(50)
+}
+
+fn load_logo(ctx: &egui::Context, px: u32) -> Option<egui::TextureHandle> {
+    let bytes = LOGOS.iter().find(|(s, _)| *s == px)?.1;
+    let icon = eframe::icon_data::from_png_bytes(bytes).ok()?;
+    let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    Some(ctx.load_texture(format!("rdm-logo-{px}"), img, egui::TextureOptions::LINEAR))
 }
