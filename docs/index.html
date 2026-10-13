@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RDM Download Manager</title>
+<meta name="description" content="A fast, modern, cross-platform download manager written in Rust. Multi-connection downloads, video and stream capture, scheduler, site grabber and a browser extension.">
+<meta property="og:title" content="RDM Download Manager">
+<meta property="og:description" content="Fast multi-connection downloads, video and stream capture from any page, scheduler, site grabber and a browser extension. Free and open source.">
+<meta property="og:image" content="https://jaylex32.github.io/rdm/screenshots/main-dark.png">
+<meta name="theme-color" content="#0b0f17">
+<link rel="icon" href="img/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="img/icon256.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0b0f17; --bg2: #10151f; --card: #141a26; --card2: #19202e; --line: #222b3b;
+  --text: #e8ecf3; --muted: #93a0b5; --accent: #2a86ff; --accent2: #5aa3ff; --glow: rgba(42,134,255,.35);
+  --radius: 16px; --max: 1160px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 Inter, "Segoe UI", system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+a { color: var(--accent2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+img { max-width: 100%; height: auto; display: block; }
+.wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+
+/* nav */
+nav { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); background: rgba(11,15,23,.72); border-bottom: 1px solid rgba(255,255,255,.05); }
+nav .wrap { display: flex; align-items: center; gap: 28px; height: 64px; }
+nav .brand img { height: 34px; width: auto; }
+nav .links { display: flex; gap: 24px; margin-left: auto; font-size: 14.5px; font-weight: 500; }
+nav .links a { color: var(--muted); }
+nav .links a:hover { color: var(--text); text-decoration: none; }
+nav .gh { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 10px; background: var(--card2); border: 1px solid var(--line); color: var(--text); font-size: 14px; font-weight: 600; }
+nav .gh:hover { text-decoration: none; border-color: #33405a; }
+
+/* buttons */
+.btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 24px; border-radius: 12px; font-weight: 600; font-size: 16px; border: 1px solid transparent; cursor: pointer; transition: transform .15s, box-shadow .15s, background .15s; }
+.btn:hover { text-decoration: none; transform: translateY(-1px); }
+.btn.primary { color: #fff; background: linear-gradient(180deg, #3a92ff, #1f74f0); box-shadow: 0 8px 28px var(--glow), inset 0 1px 0 rgba(255,255,255,.25); }
+.btn.primary:hover { box-shadow: 0 10px 36px rgba(42,134,255,.5), inset 0 1px 0 rgba(255,255,255,.25); }
+.btn.ghost { color: var(--text); background: var(--card); border-color: var(--line); }
+.btn.ghost:hover { border-color: #33405a; }
+.btn svg { width: 18px; height: 18px; }
+
+/* hero */
+.hero { position: relative; padding: 84px 0 40px; text-align: center; }
+.hero::before { content: ""; position: absolute; inset: -200px 0 auto; height: 760px; background: radial-gradient(600px 340px at 50% 30%, rgba(42,134,255,.22), transparent 70%), radial-gradient(500px 300px at 85% 10%, rgba(90,80,255,.12), transparent 70%); pointer-events: none; z-index: -1; }
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; background: rgba(42,134,255,.1); border: 1px solid rgba(42,134,255,.3); color: #9cc6ff; font-size: 13.5px; font-weight: 600; }
+.pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+h1 { font-size: clamp(36px, 6vw, 64px); line-height: 1.06; letter-spacing: -0.035em; margin: 22px auto 18px; font-weight: 800; max-width: 900px; }
+h1 span { background: linear-gradient(90deg, #5aa3ff, #2a86ff 45%, #7c6bff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lead { color: var(--muted); font-size: clamp(16px, 2vw, 19px); max-width: 680px; margin: 0 auto 34px; }
+.cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.sub { margin-top: 14px; color: var(--muted); font-size: 13.5px; }
+.shot { margin: 56px auto 0; width: 100%; max-width: 1080px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.08); box-shadow: 0 40px 120px rgba(0,0,0,.6), 0 0 0 1px rgba(42,134,255,.08), 0 0 90px rgba(42,134,255,.12); }
+
+/* sections */
+section { padding: 90px 0; }
+.head { text-align: center; max-width: 720px; margin: 0 auto 50px; }
+.head .eyebrow { color: var(--accent2); font-weight: 700; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
+h2 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -0.03em; line-height: 1.15; margin: 10px 0 14px; font-weight: 800; }
+.head p { color: var(--muted); margin: 0; font-size: 17px; }
+
+/* stats */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 48px; }
+.stat { padding: 20px; border-radius: var(--radius); background: var(--bg2); border: 1px solid var(--line); text-align: center; }
+.stat b { display: block; font-size: 28px; letter-spacing: -0.02em; }
+.stat span { color: var(--muted); font-size: 14px; }
+
+/* features */
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.card { padding: 26px; border-radius: var(--radius); background: linear-gradient(180deg, var(--card), var(--bg2)); border: 1px solid var(--line); transition: border-color .2s, transform .2s; }
+.card:hover { border-color: #2c3a55; transform: translateY(-2px); }
+.card .ico { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: rgba(42,134,255,.12); border: 1px solid rgba(42,134,255,.28); margin-bottom: 16px; }
+.card .ico svg { width: 22px; height: 22px; stroke: var(--accent2); }
+.card h3 { margin: 0 0 8px; font-size: 18px; letter-spacing: -0.01em; }
+.card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+/* split rows */
+.split { display: grid; grid-template-columns: 1fr 1.25fr; gap: 56px; align-items: center; }
+.split.rev { grid-template-columns: 1.25fr 1fr; }
+.split > *, .grid > *, .steps > *, .downloads > *, .stats > * { min-width: 0; }
+.split.rev .text { order: 2; }
+.split h2 { text-align: left; }
+.split .text p { color: var(--muted); font-size: 17px; }
+.split ul { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 12px; }
+.split li { display: flex; gap: 12px; color: #c9d2e0; }
+.split li::before { content: ""; flex: none; width: 20px; height: 20px; margin-top: 3px; border-radius: 6px; background: rgba(42,134,255,.15) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235aa3ff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5L20 7'/%3E%3C/svg%3E") center/12px no-repeat; }
+.frame { border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.08); box-shadow: 0 30px 80px rgba(0,0,0,.5), 0 0 60px rgba(42,134,255,.08); }
+
+/* gallery */
+.tabs { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 26px; }
+.tabs button { font: inherit; font-size: 14.5px; font-weight: 600; color: var(--muted); background: var(--card); border: 1px solid var(--line); padding: 9px 16px; border-radius: 10px; cursor: pointer; }
+.tabs button:hover { color: var(--text); }
+.tabs button[aria-selected="true"] { color: #fff; background: rgba(42,134,255,.16); border-color: rgba(42,134,255,.5); }
+.gallery { max-width: 1040px; margin: 0 auto; }
+.gallery figcaption { text-align: center; color: var(--muted); margin-top: 16px; font-size: 15px; }
+
+/* install */
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; counter-reset: s; }
+.step { position: relative; padding: 26px 24px 24px; border-radius: var(--radius); background: var(--bg2); border: 1px solid var(--line); }
+.step::before { counter-increment: s; content: counter(s); position: absolute; top: -14px; left: 22px; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px; color: #fff; background: linear-gradient(180deg, #3a92ff, #1f74f0); box-shadow: 0 4px 14px var(--glow); }
+.step h3 { margin: 6px 0 8px; font-size: 17px; }
+.step p { margin: 0; color: var(--muted); font-size: 15px; }
+.downloads { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 40px; }
+.dl { display: flex; flex-direction: column; gap: 4px; padding: 18px 20px; border-radius: 14px; background: var(--card); border: 1px solid var(--line); color: var(--text); transition: border-color .2s; }
+.dl:hover { text-decoration: none; border-color: var(--accent); }
+.dl.me { border-color: rgba(42,134,255,.6); box-shadow: 0 0 0 1px rgba(42,134,255,.3), 0 8px 30px rgba(42,134,255,.15); }
+.dl b { font-size: 16px; }
+.dl span { color: var(--muted); font-size: 13.5px; }
+code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: .9em; background: var(--card2); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; color: #cfe0ff; }
+pre { background: #0d121c; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; overflow-x: auto; font: 14px/1.7 ui-monospace, "Cascadia Code", Consolas, monospace; color: #cfe0ff; }
+
+/* footer */
+.final { text-align: center; padding: 70px 24px; border-radius: 22px; background: radial-gradient(500px 220px at 50% 0%, rgba(42,134,255,.22), transparent 70%), var(--bg2); border: 1px solid var(--line); }
+footer { padding: 40px 0 60px; color: var(--muted); font-size: 14px; }
+footer .wrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+footer img { height: 26px; width: auto; }
+footer .right { margin-left: auto; display: flex; gap: 20px; }
+footer a { color: var(--muted); }
+
+@media (max-width: 900px) {
+  .grid, .steps { grid-template-columns: 1fr 1fr; }
+  .split, .split.rev { grid-template-columns: 1fr; gap: 32px; }
+  .split.rev .text { order: 0; }
+  .downloads, .stats { grid-template-columns: 1fr 1fr; }
+  nav .links { display: none; }
+  nav .gh { margin-left: auto; }
+}
+@media (max-width: 600px) {
+  .wrap { padding: 0 16px; }
+  .grid, .steps, .downloads { grid-template-columns: 1fr; }
+  section { padding: 64px 0; }
+  .hero { padding-top: 56px; }
+  .btn { width: 100%; justify-content: center; }
+  footer .right { margin-left: 0; }
+  .stat b { font-size: 21px; }
+  .stat span { font-size: 13px; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#"><img src="img/logo.svg" alt="RDM Download Manager" width="89" height="34"></a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#video">Video</a>
+      <a href="#screenshots">Screenshots</a>
+      <a href="#extension">Extension</a>
+      <a href="#download">Download</a>
+    </div>
+    <a class="gh" href="https://github.com/jaylex32/rdm">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="pill"><i></i> Free &amp; open source · Windows · Linux · macOS</span>
+    <h1>Download everything.<br><span>Faster.</span></h1>
+    <p class="lead">RDM splits every file across many connections, grabs videos and streams from any page, and keeps your downloads organised. Written in Rust, light on memory, and responsive at all times.</p>
+    <div class="cta">
+      <a class="btn primary" id="hero-dl" href="https://github.com/jaylex32/rdm/releases/latest">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+        <span>Download RDM</span>
+      </a>
+      <a class="btn ghost" href="https://github.com/jaylex32/rdm">View on GitHub</a>
+    </div>
+    <div class="sub" id="hero-sub">Free download · no account · no ads</div>
+    <img class="shot" src="screenshots/main-dark.png" alt="RDM main window with active downloads" width="1280" height="800">
+    <div class="stats">
+      <div class="stat"><b>8+</b><span>connections per file</span></div>
+      <div class="stat"><b>HLS · DASH</b><span>streams in any quality</span></div>
+      <div class="stat"><b>4K · 60 fps</b><span>video, merged for you</span></div>
+      <div class="stat"><b>6 browsers</b><span>one extension</span></div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Features</div>
+      <h2>Everything a download manager should do</h2>
+      <p>Built from the engine up for speed and reliability, with the tools you expect and none of the clutter.</p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg></div>
+        <h3>Multi-connection engine</h3>
+        <p>Each file is split across up to 32 connections. A free connection always takes over half of the slowest part, so every socket stays busy to the very end.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg></div>
+        <h3>Pause and resume anywhere</h3>
+        <p>Stop a download and pick it up later, even after a crash or a reboot. Progress is saved every few seconds.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3V9z"/></svg></div>
+        <h3>Video and streams</h3>
+        <p>HLS and MPEG-DASH in the quality you choose, with separate audio tracks joined into one MP4 or WebM by the built-in muxer.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+        <h3>Scheduler and queues</h3>
+        <p>Run queues at set times and weekdays, limit how many files download at once, then exit, sleep or shut down when everything is done.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/></svg></div>
+        <h3>Site grabber</h3>
+        <p>Crawl a website and collect its images, videos, documents or archives, or save a complete offline copy you can browse locally.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16M6 16l4-4 3 3 5-6"/></svg></div>
+        <h3>Speed limits and quotas</h3>
+        <p>Global and per-download limits, plus quotas like “at most 500 MB every 2 hours” so the rest of the house can still browse.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg></div>
+        <h3>Organised automatically</h3>
+        <p>Categories with their own folders, smart file names, and protection against files that disguise their real extension.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg></div>
+        <h3>Command line</h3>
+        <p>The <code>rdm</code> tool downloads from scripts, sends links to the running app, or runs RDM headless as a daemon.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.2-8 9-4.6-.8-8-4.5-8-9V6l8-3z"/></svg></div>
+        <h3>Private by design</h3>
+        <p>No accounts, no tracking, no ads. The extension only talks to RDM on your own computer.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="video" style="padding-top:20px">
+  <div class="wrap split rev">
+    <div class="text">
+      <div class="head" style="text-align:left;margin:0"><div class="eyebrow">Video detection</div></div>
+      <h2>A download button on every video</h2>
+      <p>Play a video and RDM's button appears on the player. Pick the quality and the download starts right away.</p>
+      <ul>
+        <li>Finds HLS and DASH streams, plain video files and subtitles</li>
+        <li>Every quality listed, from 480p to 4K</li>
+        <li>Video and audio joined into one file automatically</li>
+        <li>Works on YouTube, including 4K and 60 fps</li>
+        <li>Hide the button on sites where you don't want it</li>
+      </ul>
+    </div>
+    <div class="frame"><img src="img/video-menu.png" alt="Download this video menu on a video player" width="980" height="562" loading="lazy"></div>
+  </div>
+</section>
+
+<section id="details" style="padding-top:20px">
+  <div class="wrap split">
+    <div class="text">
+      <div class="head" style="text-align:left;margin:0"><div class="eyebrow">Under the hood</div></div>
+      <h2>Watch every connection work</h2>
+      <p>The details window shows each connection's part of the file in real time, along with speed, time left and whether the server can resume.</p>
+      <ul>
+        <li>Starts with 4 connections and adds more while they all receive data</li>
+        <li>Adapts to servers that limit parallel connections</li>
+        <li>Checks the overlap between parts to catch bad data</li>
+        <li>HTTP, HTTPS, FTP, proxies, logins and browser cookies</li>
+      </ul>
+    </div>
+    <div class="frame"><img src="screenshots/details.png" alt="Download details with per-connection progress" width="1280" height="800" loading="lazy"></div>
+  </div>
+</section>
+
+<section id="screenshots" style="padding-top:40px">
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Screenshots</div>
+      <h2>Clean, fast and easy on the eyes</h2>
+      <p>Dark and light themes, a compact layout, and dialogs that stay out of your way.</p>
+    </div>
+    <div class="tabs" role="tablist" id="tabs">
+      <button role="tab" aria-selected="true" data-img="main-light.png" data-cap="Light theme">Light theme</button>
+      <button role="tab" aria-selected="false" data-img="new-download.png" data-cap="New download: name, folder, category and size before you start">New download</button>
+      <button role="tab" aria-selected="false" data-img="scheduler.png" data-cap="Scheduler: start and stop queues at set times">Scheduler</button>
+      <button role="tab" aria-selected="false" data-img="grabber.png" data-cap="Site grabber: collect files from a whole website">Site grabber</button>
+      <button role="tab" aria-selected="false" data-img="options.png" data-cap="Options: connections, speed limits, proxies, browser integration">Options</button>
+      <button role="tab" aria-selected="false" data-img="extension-popup.png" data-cap="Extension popup: every media file found on the page">Extension</button>
+    </div>
+    <figure class="gallery" style="margin:0 auto">
+      <div class="frame"><img id="gimg" src="screenshots/main-light.png" alt="RDM light theme" width="1280" height="800" loading="lazy"></div>
+      <figcaption id="gcap">Light theme</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="extension">
+  <div class="wrap split">
+    <div class="text">
+      <div class="head" style="text-align:left;margin:0"><div class="eyebrow">Browser extension</div></div>
+      <h2>Works with the browser you already use</h2>
+      <p>Chrome, Edge, Brave, Vivaldi, Opera and Firefox. Downloads go straight to RDM, and the right-click menu gets <b>Download with RDM</b> entries.</p>
+      <ul>
+        <li>Built-in setup helper: RDM finds your browsers and walks you through every step</li>
+        <li>Drag the extension folder from RDM straight onto the browser</li>
+        <li><span>Hold <code>Alt</code> to force a download through RDM, <code>Ctrl</code> to skip it</span></li>
+        <li>Choose which file types RDM takes over</li>
+      </ul>
+    </div>
+    <div class="frame"><img src="screenshots/extension-setup.png" alt="Browser extension setup helper" width="1280" height="800" loading="lazy"></div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">Get started</div>
+      <h2>Up and running in a minute</h2>
+      <p>No installer needed. Unpack, run, and connect your browser.</p>
+    </div>
+    <div class="steps">
+      <div class="step"><h3>Download</h3><p>Get the archive for your system from the latest release below.</p></div>
+      <div class="step"><h3>Unpack and run</h3><p>Unzip anywhere and start <code>rdm-gui</code> (on macOS, <code>RDM.app</code>).</p></div>
+      <div class="step"><h3>Add the extension</h3><p>Open <b>Options → Install browser extension…</b> and follow the steps for your browser.</p></div>
+    </div>
+    <div class="downloads" id="downloads">
+      <a class="dl" data-os="windows" data-asset="windows-x64" href="https://github.com/jaylex32/rdm/releases/latest"><b>Windows</b><span>10 / 11 · x64 · .zip</span></a>
+      <a class="dl" data-os="linux" data-asset="linux-x64" href="https://github.com/jaylex32/rdm/releases/latest"><b>Linux</b><span>x64 · .tar.gz</span></a>
+      <a class="dl" data-os="mac-arm" data-asset="macos-arm64" href="https://github.com/jaylex32/rdm/releases/latest"><b>macOS</b><span>Apple Silicon · .tar.gz</span></a>
+      <a class="dl" data-os="mac-intel" data-asset="macos-x64" href="https://github.com/jaylex32/rdm/releases/latest"><b>macOS</b><span>Intel · .tar.gz</span></a>
+    </div>
+    <p class="sub" style="text-align:center" id="ver">All files are on the <a href="https://github.com/jaylex32/rdm/releases">releases page</a>.</p>
+
+    <div class="head" style="margin-top:80px;margin-bottom:24px"><h2 style="font-size:28px">Prefer the command line?</h2></div>
+<pre>rdm get https://example.com/big-file.iso -c 16    # download with 16 connections
+rdm add https://example.com/video.mp4 --now       # send to the running app
+rdm list                                          # what the app is downloading
+rdm daemon                                        # run without a window</pre>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="final">
+      <h2>Ready for faster downloads?</h2>
+      <p style="color:var(--muted);margin:0 0 28px">Free and open source under the MIT license.</p>
+      <div class="cta">
+        <a class="btn primary" href="#download">Download RDM</a>
+        <a class="btn ghost" href="https://github.com/jaylex32/rdm">Star on GitHub</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <img src="img/logo.svg" alt="RDM" width="69" height="26">
+    <span>© 2026 RDM · MIT license</span>
+    <div class="right">
+      <a href="https://github.com/jaylex32/rdm">GitHub</a>
+      <a href="https://github.com/jaylex32/rdm/issues">Report an issue</a>
+      <a href="privacy.html">Privacy</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Screenshot tabs
+const tabs = document.getElementById("tabs");
+tabs.addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  for (const t of tabs.children) t.setAttribute("aria-selected", t === b);
+  const img = document.getElementById("gimg");
+  img.src = "screenshots/" + b.dataset.img;
+  img.alt = b.dataset.cap;
+  document.getElementById("gcap").textContent = b.dataset.cap;
+});
+
+// Highlight the visitor's system and link straight to the right file of the latest release.
+const ua = navigator.userAgent;
+const os = /Windows/.test(ua) ? "windows" : /Mac/.test(ua) ? "mac-arm" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? "linux" : "";
+const names = { windows: "for Windows", "mac-arm": "for macOS", linux: "for Linux" };
+if (os) {
+  document.querySelector(`.dl[data-os="${os}"]`)?.classList.add("me");
+  document.querySelector("#hero-dl span").textContent = "Download " + names[os];
+}
+fetch("https://api.github.com/repos/jaylex32/rdm/releases/latest")
+  .then((r) => (r.ok ? r.json() : null))
+  .then((rel) => {
+    if (!rel || !rel.assets) return;
+    const find = (key) => rel.assets.find((a) => a.name.includes(key));
+    for (const el of document.querySelectorAll(".dl")) {
+      const a = find(el.dataset.asset);
+      if (a) el.href = a.browser_download_url;
+    }
+    const mine = os && find(document.querySelector(`.dl[data-os="${os}"]`).dataset.asset);
+    if (mine) document.getElementById("hero-dl").href = "#download";
+    document.getElementById("hero-sub").textContent = `Version ${rel.tag_name.replace(/^v/, "")} · free · no account · no ads`;
+    document.getElementById("ver").innerHTML = `Latest version: <b>${rel.tag_name}</b> · <a href="${rel.html_url}">release notes and all files</a>`;
+  })
+  .catch(() => {});
+</script>
+</body>
+</html>
