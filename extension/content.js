@@ -31,10 +31,15 @@
       position: absolute; top: 40px; right: 0; width: 310px; max-height: 360px; overflow: auto; padding: 6px;
       background: rgba(18, 21, 28, 0.96); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 14px;
       box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-      scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent;
     }
-    .menu::-webkit-scrollbar { width: 8px; }
-    .menu::-webkit-scrollbar-thumb { background: rgba(255,255,255,.22); border-radius: 4px; }
+    /* Slim overlay-style scrollbar (Chromium); Firefox gets the standard thin one below. */
+    .menu::-webkit-scrollbar { width: 6px; }
+    .menu::-webkit-scrollbar-track { background: transparent; margin: 10px 0; }
+    .menu::-webkit-scrollbar-thumb { background: rgba(255,255,255,.16); border-radius: 3px; }
+    .menu:hover::-webkit-scrollbar-thumb { background: rgba(255,255,255,.28); }
+    .menu::-webkit-scrollbar-thumb:hover { background: rgba(42,134,255,.75); }
+    .menu::-webkit-scrollbar-button { display: none; height: 0; }
+    @supports (-moz-appearance: none) { .menu { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent; } }
     .menu.up { top: auto; bottom: 40px; }
     .menu[hidden] { display: none; }
     .head { padding: 8px 10px 6px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: #8b93a5; }

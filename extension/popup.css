@@ -97,3 +97,14 @@ li.note { display: block; color: var(--dim); font-size: 12px; background: transp
 .brand picture, .brand img { display: block; height: 44px; width: auto; margin-left: -4px; }
 button:not(.ghost) { box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 35%, transparent); }
 
+
+/* Slim modern scrollbars (Chromium); Firefox uses the standard thin style. */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--dim) 35%, transparent); border-radius: 3px; }
+:hover::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--dim) 55%, transparent); }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+::-webkit-scrollbar-button { display: none; height: 0; }
+@supports (-moz-appearance: none) {
+  * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--dim) 45%, transparent) transparent; }
+}
