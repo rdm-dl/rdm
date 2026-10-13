@@ -31,6 +31,12 @@ async fn serve(data: Arc<Vec<u8>>, ranges: bool, rate: usize) -> Server {
 
 /// Like `serve`, but drops connections beyond `max_conns` at once.
 async fn serve_limited(data: Arc<Vec<u8>>, ranges: bool, rate: usize, max_conns: usize) -> Server {
+    serve_opts(data, ranges, rate, max_conns, usize::MAX).await
+}
+
+/// Full control: only the first `honoured` range requests get a partial answer; later ones
+/// get the whole file with 200 (servers that stop honouring ranges mid-download).
+async fn serve_opts(data: Arc<Vec<u8>>, ranges: bool, rate: usize, max_conns: usize, honoured: usize) -> Server {
     let open = Arc::new(AtomicUsize::new(0));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -68,8 +74,7 @@ async fn serve_limited(data: Arc<Vec<u8>>, ranges: bool, rate: usize, max_conns:
                     });
                     let total = data.len();
                     let (start, end, status) = match (ranges, range) {
-                        (true, Some(r)) => {
-                            ranged.fetch_add(1, Ordering::SeqCst);
+                        (true, Some(r)) if ranged.fetch_add(1, Ordering::SeqCst) < honoured => {
                             let (a, b) = r.split_once('-').unwrap();
                             let a: usize = a.parse().unwrap();
                             let b: usize = if b.is_empty() { total - 1 } else { b.parse::<usize>().unwrap().min(total - 1) };
@@ -204,4 +209,19 @@ async fn server_with_connection_limit_still_completes() {
     let dl = Download::start(req, cfg, tmp, Arc::new(Limiter::default()));
     let path = tokio::time::timeout(Duration::from_secs(60), dl.wait()).await.expect("stalled").unwrap().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), *data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_that_stops_honouring_ranges_falls_back_to_one_connection() {
+    // The first connection and the first extra ones get partial answers; then the server
+    // starts ignoring Range. The extra connections are stopped and one connection fetches
+    // the whole file. Stopping them must not fail the download.
+    let data = content(3 * 1024 * 1024);
+    let srv = serve_opts(data.clone(), true, 400 * 1024, usize::MAX, 4).await;
+    let (out, tmp) = dirs("rangestop");
+    let req = DownloadRequest { url: format!("http://127.0.0.1:{}/data.bin", srv.port), dir: out, ..Default::default() };
+    let dl = Download::start(req, fast_cfg(), tmp, Arc::new(Limiter::default()));
+    let path = tokio::time::timeout(Duration::from_secs(60), dl.wait()).await.expect("stalled").unwrap().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), *data);
+    assert!(srv.ranged_requests.load(Ordering::SeqCst) > 4, "the fallback was never triggered");
 }

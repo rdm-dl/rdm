@@ -856,9 +856,12 @@ async fn run_inner(
     loop {
         tokio::select! {
             joined = workers.join_next(), if !workers.is_empty() => {
-                if let Some(joined) = joined {
-                    let (id, res) = joined.map_err(|e| DownloadError::Other(e.to_string()))?;
-                    match res {
+                match joined {
+                    None => {}
+                    // A connection stopped on purpose (abort_all before the single-connection restart).
+                    Some(Err(e)) if e.is_cancelled() => {}
+                    Some(Err(e)) => return Err(DownloadError::Other(e.to_string())),
+                    Some(Ok((id, res))) => match res {
                         Ok(WorkerExit::Done) => {}
                         Ok(WorkerExit::NoRanges) | Ok(WorkerExit::Corrupt) => {
                             restart_single = true;
@@ -870,7 +873,7 @@ async fn run_inner(
                             ctx.save(&info);
                             return Err(e);
                         }
-                    }
+                    },
                 }
             }
             _ = control.changed() => {
