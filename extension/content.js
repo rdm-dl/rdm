@@ -21,8 +21,7 @@
       white-space: nowrap;
     }
     .btn:hover { background: rgba(28, 33, 44, 0.94); border-color: rgba(42, 134, 255, 0.55); transform: translateY(-1px); }
-    .ico.fallback { display: grid; place-items: center; border-radius: 50%; background: #2a86ff; color: #fff; }
-    .ico { display: block; width: 26px; height: 26px; flex: none; filter: drop-shadow(0 1px 4px rgba(42, 134, 255, 0.45)); }
+    .ico { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; flex: none; color: #fff; background: linear-gradient(180deg, #4a9dff 0%, #2a86ff 55%, #1f6fe8 100%); box-shadow: 0 2px 8px rgba(42, 134, 255, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
     .label { padding-right: 2px; }
     .count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: rgba(255,255,255,.14); font-size: 11px; display: grid; place-items: center; }
     .count:empty { display: none; }
@@ -108,17 +107,8 @@
     const wrap = el("div", "wrap");
     btn = el("button", "btn");
     btn.type = "button";
-    // The RDM app icon (falls back to a drawn arrow if the page blocks extension images).
-    const ico = el("img", "ico");
-    ico.alt = "";
-    try {
-      ico.src = api.runtime.getURL("icons/icon32.png");
-    } catch {}
-    ico.addEventListener("error", () => {
-      const fallback = el("span", "ico fallback");
-      fallback.innerHTML = ICON;
-      ico.replaceWith(fallback);
-    });
+    const ico = el("span", "ico");
+    ico.innerHTML = ICON;
     label = el("span", "label", "Download this video");
     count = el("span", "count", mediaCount ? String(mediaCount) : "");
     const x = el("span", "x", "×");
