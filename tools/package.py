@@ -8,7 +8,9 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import tarfile
+import time
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,7 +56,9 @@ def mac_app(out_dir, bin_dir, ver):
         "CFBundleShortVersionString": ver,
         "CFBundleExecutable": "rdm-gui",
         "CFBundlePackageType": "APPL",
+        "CFBundleIconFile": "rdm.icns",
         "LSMinimumSystemVersion": "11.0",
+        "LSApplicationCategoryType": "public.app-category.utilities",
         "NSHighResolutionCapable": True,
     }
     lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">', '<plist version="1.0"><dict>']
@@ -62,7 +66,31 @@ def mac_app(out_dir, bin_dir, ver):
         lines.append(f"<key>{k}</key>" + ("<true/>" if v is True else f"<string>{v}</string>"))
     lines.append("</dict></plist>")
     open(os.path.join(app, "Info.plist"), "w").write("\n".join(lines))
-    shutil.copy(os.path.join(ROOT, "assets", "icon256.png"), os.path.join(app, "Resources", "icon.png"))
+    shutil.copy(os.path.join(ROOT, "assets", "rdm.icns"), os.path.join(app, "Resources", "rdm.icns"))
+    # The app finds the extension in Contents/Resources (see util::bundled).
+    build_extensions(os.path.join(app, "Resources"))
+
+
+def mac_dmg(out_dir, dmg):
+    """Disk image with RDM.app and a shortcut to Applications, so installing is a drag."""
+    app = os.path.join(out_dir, "RDM.app")
+    # Ad-hoc signature: without any signature Apple Silicon Macs call a downloaded app "damaged".
+    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app], check=True)
+    stage = os.path.join(os.path.dirname(dmg), "dmg-stage")
+    shutil.rmtree(stage, ignore_errors=True)
+    os.makedirs(stage)
+    shutil.copytree(app, os.path.join(stage, "RDM.app"), symlinks=True)
+    os.symlink("/Applications", os.path.join(stage, "Applications"))
+    if os.path.exists(dmg):
+        os.remove(dmg)
+    # hdiutil sometimes fails with "Resource busy" on CI machines; a retry clears it.
+    for attempt in range(3):
+        if subprocess.run(["hdiutil", "create", "-volname", "RDM", "-srcfolder", stage, "-ov", "-format", "UDZO", dmg]).returncode == 0:
+            break
+        if attempt == 2:
+            raise SystemExit("hdiutil create failed")
+        time.sleep(5)
+    shutil.rmtree(stage, ignore_errors=True)
 
 
 def main():
@@ -78,20 +106,31 @@ def main():
     bin_dir = a.bin_dir or (os.path.join(ROOT, "target", a.target, "release") if a.target else os.path.join(ROOT, "target", "release"))
     pkg = f"RDM-{ver}-{name}"
     out = os.path.join(ROOT, "dist", pkg)
-    shutil.rmtree(out, ignore_errors=True)
+    if os.path.exists(out):
+        # Renaming fails while RDM runs from this folder; stop before deleting anything.
+        old = out + ".old"
+        shutil.rmtree(old, ignore_errors=True)
+        try:
+            os.rename(out, old)
+        except OSError:
+            raise SystemExit(f"{out} is in use (is RDM running from it?). Close it and run again.")
+        shutil.rmtree(old)
     os.makedirs(out)
     if system == "darwin":
         mac_app(out, bin_dir, ver)
     else:
         for b in ("rdm-gui", "rdm", "rdm-bridge"):
             shutil.copy2(os.path.join(bin_dir, b + exe), out)
-    build_extensions(out)
+        build_extensions(out)
     for f in ("README.md", "LICENSE"):
         if os.path.exists(os.path.join(ROOT, f)):
             shutil.copy(os.path.join(ROOT, f), out)
     json.dump({"version": ver, "platform": name}, open(os.path.join(out, "build.json"), "w"))
     dist = os.path.join(ROOT, "dist")
-    if system == "windows":
+    if system == "darwin":
+        archive = os.path.join(dist, pkg + ".dmg")
+        mac_dmg(out, archive)
+    elif system == "windows":
         archive = os.path.join(dist, pkg + ".zip")
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
             for base, _, files in os.walk(out):

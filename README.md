@@ -78,10 +78,11 @@ Download the archive for your system from the [latest release](https://github.co
 |---|---|---|
 | Windows 10/11 (x64) | `RDM-<version>-windows-x64.zip` | `rdm-gui.exe` |
 | Linux (x64) | `RDM-<version>-linux-x64.tar.gz` | `rdm-gui` |
-| macOS (Apple Silicon) | `RDM-<version>-macos-arm64.tar.gz` | `RDM.app` |
-| macOS (Intel) | `RDM-<version>-macos-x64.tar.gz` | `RDM.app` |
+| macOS (Apple Silicon) | `RDM-<version>-macos-arm64.dmg` | `RDM.app` |
+| macOS (Intel) | `RDM-<version>-macos-x64.dmg` | `RDM.app` |
 
-Unpack it anywhere (for example `C:\Program Files\RDM`) and run the app. On macOS the app is not signed yet: right-click `RDM.app` → **Open** the first time.
+- **Windows / Linux:** unpack it anywhere (for example `C:\Program Files\RDM`) and run the app.
+- **macOS:** open the `.dmg` and drag **RDM** onto **Applications**. RDM isn't notarized by Apple yet, so the first time macOS will say it can't check the app: click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to RDM. After that it opens normally.
 
 ## Browser extension
 
@@ -118,7 +119,7 @@ Requires Rust 1.85+ (edition 2024).
 
 ```
 cargo build --release
-python tools/package.py          # archive + extension in dist/
+python tools/package.py          # archive (.zip / .tar.gz / macOS .dmg) + extension in dist/
 python tools/store_packages.py   # extension store packages in dist/store/
 ```
 

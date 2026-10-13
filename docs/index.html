@@ -322,18 +322,18 @@ footer a { color: var(--muted); }
     <div class="head">
       <div class="eyebrow">Get started</div>
       <h2>Up and running in a minute</h2>
-      <p>No installer needed. Unpack, run, and connect your browser.</p>
+      <p>Download, install, and connect your browser.</p>
     </div>
     <div class="steps">
       <div class="step"><h3>Download</h3><p>Get the archive for your system from the latest release below.</p></div>
-      <div class="step"><h3>Unpack and run</h3><p>Unzip anywhere and start <code>rdm-gui</code> (on macOS, <code>RDM.app</code>).</p></div>
+      <div class="step"><h3>Install</h3><p>Unzip anywhere and start <code>rdm-gui</code>. On macOS, open the <code>.dmg</code> and drag RDM to Applications.</p></div>
       <div class="step"><h3>Add the extension</h3><p>Open <b>Options → Install browser extension…</b> and follow the steps for your browser.</p></div>
     </div>
     <div class="downloads" id="downloads">
       <a class="dl" data-os="windows" data-asset="windows-x64" href="https://github.com/rdm-dl/rdm/releases/latest"><b>Windows</b><span>10 / 11 · x64 · .zip</span></a>
       <a class="dl" data-os="linux" data-asset="linux-x64" href="https://github.com/rdm-dl/rdm/releases/latest"><b>Linux</b><span>x64 · .tar.gz</span></a>
-      <a class="dl" data-os="mac-arm" data-asset="macos-arm64" href="https://github.com/rdm-dl/rdm/releases/latest"><b>macOS</b><span>Apple Silicon · .tar.gz</span></a>
-      <a class="dl" data-os="mac-intel" data-asset="macos-x64" href="https://github.com/rdm-dl/rdm/releases/latest"><b>macOS</b><span>Intel · .tar.gz</span></a>
+      <a class="dl" data-os="mac-arm" data-asset="macos-arm64" href="https://github.com/rdm-dl/rdm/releases/latest"><b>macOS</b><span>Apple Silicon · .dmg</span></a>
+      <a class="dl" data-os="mac-intel" data-asset="macos-x64" href="https://github.com/rdm-dl/rdm/releases/latest"><b>macOS</b><span>Intel · .dmg</span></a>
     </div>
     <p class="sub" style="text-align:center" id="ver">All files are on the <a href="https://github.com/rdm-dl/rdm/releases">releases page</a>.</p>
 
@@ -395,7 +395,7 @@ fetch("https://api.github.com/repos/rdm-dl/rdm/releases/latest")
   .then((r) => (r.ok ? r.json() : null))
   .then((rel) => {
     if (!rel || !rel.assets) return;
-    const find = (key) => rel.assets.find((a) => a.name.includes(key));
+    const find = (key) => rel.assets.find((a) => a.name.includes(key + "."));
     for (const el of document.querySelectorAll(".dl")) {
       const a = find(el.dataset.asset);
       if (a) el.href = a.browser_download_url;

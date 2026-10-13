@@ -123,8 +123,7 @@ const EDGE_UPDATE: &str = "https://edge.microsoft.com/extensionwebstorebase/v1/c
 const FIREFOX_APP_ID: &str = "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}";
 
 fn firefox_xpi() -> Option<PathBuf> {
-    let p = std::env::current_exe().ok()?.with_file_name("rdm-firefox.xpi");
-    p.exists().then_some(p)
+    crate::util::bundled("rdm-firefox.xpi")
 }
 
 /// Ask installed browsers to add the extension, the way installers do: Chromium browsers

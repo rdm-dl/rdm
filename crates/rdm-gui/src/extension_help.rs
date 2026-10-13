@@ -92,18 +92,15 @@ fn detect() -> Vec<Browser> {
 /// The unpacked Chromium extension folder shipped next to the app (or the source folder
 /// in a development build).
 fn chromium_folder() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let packaged = dir.join("extension-chrome");
-    if packaged.join("manifest.json").exists() {
+    if let Some(packaged) = crate::util::bundled("extension-chrome").filter(|p| p.join("manifest.json").exists()) {
         return Some(packaged);
     }
-    dir.ancestors().map(|a| a.join("extension")).find(|p| p.join("manifest.json").exists())
+    let exe = std::env::current_exe().ok()?;
+    exe.parent()?.ancestors().map(|a| a.join("extension")).find(|p| p.join("manifest.json").exists())
 }
 
 fn firefox_package() -> Option<PathBuf> {
-    let p = std::env::current_exe().ok()?.parent()?.join("rdm-firefox.xpi");
-    p.exists().then_some(p)
+    crate::util::bundled("rdm-firefox.xpi")
 }
 
 impl ExtensionHelp {

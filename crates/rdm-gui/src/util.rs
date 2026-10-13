@@ -1,7 +1,7 @@
 //! Formatting and OS helpers.
 
 use rdm_core::settings::OnQueueDone;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -52,6 +52,14 @@ pub fn parse_size(s: &str) -> Option<u64> {
         _ => (s, 1.0),
     };
     n.trim().parse::<f64>().ok().map(|v| (v * m) as u64)
+}
+
+/// A file shipped with the app: next to the executable, or in `Contents/Resources` when
+/// running from a macOS app bundle.
+pub fn bundled(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.join(name), dir.join("../Resources").join(name)].into_iter().find(|p| p.exists())
 }
 
 pub fn open_file(p: &Path) {
