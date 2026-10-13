@@ -1,3 +1,4 @@
+/* Same palette as the RDM app (crates/rdm-gui/src/theme.rs). */
 :root {
   --bg: #0f1116;
   --surface: #181c24;
@@ -5,7 +6,8 @@
   --border: #2a303c;
   --text: #e8ebf1;
   --dim: #8b93a5;
-  --accent: #5b7cff;
+  --accent: #2a86ff;
+  --accent-soft: #10274a;
   --ok: #34c77b;
   --bad: #f05d5e;
 }
@@ -17,6 +19,10 @@
     --border: #dfe3ec;
     --text: #161a23;
     --dim: #6a7284;
+    --accent: #1673f0;
+    --accent-soft: #e2eeff;
+    --ok: #1ea863;
+    --bad: #dc3f41;
   }
 }
 * { box-sizing: border-box; }
@@ -86,3 +92,8 @@ footer { padding: 0 16px 14px; }
 .qualities button { padding: 5px 8px; font-size: 11.5px; }
 .switch { display: inline-block; flex: none; }
 li.note { display: block; color: var(--dim); font-size: 12px; background: transparent; border-style: dashed; }
+
+.brand { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.brand picture, .brand img { display: block; height: 44px; width: auto; margin-left: -4px; }
+button:not(.ghost) { box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 35%, transparent); }
+

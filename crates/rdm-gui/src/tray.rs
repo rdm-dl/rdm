@@ -26,7 +26,7 @@ pub fn create(ctx: egui::Context) -> Option<Tray> {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let png = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon256.png")).ok()?;
+    let png = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/tray32.png")).ok()?;
     let icon = tray_icon::Icon::from_rgba(png.rgba, png.width, png.height).ok()?;
     let menu = Menu::new();
     let show = MenuItem::new("Show RDM", true, None);

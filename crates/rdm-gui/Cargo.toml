@@ -23,6 +23,7 @@ rfd = "0.17.2"
 arboard = "3.6.1"
 open = "5.4.4"
 egui-phosphor = { version = "0.14.0", features = ["fill", "bold"] }
+resvg = { version = "0.45", default-features = false }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.26"

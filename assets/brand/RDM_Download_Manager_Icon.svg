@@ -1,38 +1,128 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="RDM Download Manager icon">
- <defs>
-  <linearGradient id="plate" x1="0.12" y1="0" x2="0.8" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#153f82"/><stop offset=".25" stop-color="#092658"/><stop offset=".62" stop-color="#071936"/><stop offset="1" stop-color="#04102a"/></linearGradient>
-  <radialGradient id="plateLight" cx="25%" cy="6%" r="94%"><stop stop-color="#77bcff" stop-opacity=".35"/><stop offset=".35" stop-color="#1164c6" stop-opacity=".08"/><stop offset="1" stop-color="#020b25" stop-opacity="0"/></radialGradient>
-  <linearGradient id="rim" x1=".1" y1="0" x2=".92" y2="1"><stop stop-color="#84edff"/><stop offset=".24" stop-color="#368dff"/><stop offset=".65" stop-color="#1045ff"/><stop offset="1" stop-color="#14b9ff"/></linearGradient>
-  <linearGradient id="arrow" x1=".12" y1="0" x2=".82" y2="1"><stop stop-color="#82f5ff"/><stop offset=".32" stop-color="#46b6fc"/><stop offset=".72" stop-color="#2376f8"/><stop offset="1" stop-color="#4ae5ff"/></linearGradient>
-  <linearGradient id="tray" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#93caff"/><stop offset=".22" stop-color="#5384cf"/><stop offset=".57" stop-color="#18449e"/><stop offset="1" stop-color="#0838b2"/></linearGradient>
-  <linearGradient id="streak" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#57eaff"/><stop offset=".6" stop-color="#147aff"/><stop offset="1" stop-color="#09458f" stop-opacity="0"/></linearGradient>
-  <radialGradient id="coreGlow"><stop stop-color="#00eaff" stop-opacity=".8"/><stop offset=".28" stop-color="#1269ff" stop-opacity=".6"/><stop offset="1" stop-color="#1859ff" stop-opacity="0"/></radialGradient>
-  <filter id="glow" x="-35%" y="-35%" width="170%" height="170%"><feGaussianBlur stdDeviation="11"/></filter>
-  <filter id="smallGlow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="4"/></filter>
-  <clipPath id="round"><rect x="47" y="47" width="930" height="930" rx="212"/></clipPath>
- </defs>
- <!-- Everything outside the rounded square is transparent. -->
- <rect x="53" y="53" width="918" height="918" rx="205" fill="#166eff" opacity=".55" filter="url(#glow)"/>
- <rect x="47" y="47" width="930" height="930" rx="212" fill="url(#plate)" stroke="url(#rim)" stroke-width="8"/>
- <g clip-path="url(#round)">
-  <rect x="50" y="50" width="924" height="924" fill="url(#plateLight)"/>
-  <path d="M80 354V258C80 157 158 79 260 79H758" fill="none" stroke="#b6eaff" stroke-opacity=".24" stroke-width="24"/>
-  <rect x="251" y="299" width="31" height="204" rx="15.5" fill="#1754a6" opacity=".5"/>
-  <rect x="318" y="208" width="32" height="262" rx="16" fill="url(#streak)"/>
-  <rect x="383" y="149" width="31" height="204" rx="15.5" fill="#1761d5" opacity=".48"/>
-  <ellipse cx="513" cy="719" rx="345" ry="145" fill="url(#coreGlow)"/>
-  <!-- arrow glow -->
-  <path d="M455 224Q455 197 482 197H543Q570 197 570 224V445H673Q713 445 686 478L539 647Q513 678 487 647L339 478Q312 445 352 445H455Z" fill="#168aff" opacity=".52" filter="url(#glow)"/>
-  <!-- download arrow -->
-  <path d="M455 224Q455 197 482 197H543Q570 197 570 224V445H673Q713 445 686 478L539 647Q513 678 487 647L339 478Q312 445 352 445H455Z" fill="url(#arrow)" stroke="#a6f6ff" stroke-width="5" stroke-linejoin="round"/>
-  <path d="M462 232Q462 205 487 205H539Q563 205 563 231V452H674" fill="none" stroke="#e8ffff" stroke-opacity=".48" stroke-width="5" stroke-linecap="round"/>
-  <!-- tray glow -->
-  <path d="M209 574Q209 550 237 550H273Q300 550 300 578V683Q300 711 329 711H695Q724 711 724 683V578Q724 550 751 550H786Q814 550 814 578V744Q814 817 740 817H284Q209 817 209 742Z" fill="#168dff" opacity=".55" filter="url(#glow)"/>
-  <!-- tray -->
-  <path d="M209 574Q209 550 237 550H273Q300 550 300 578V683Q300 711 329 711H695Q724 711 724 683V578Q724 550 751 550H786Q814 550 814 578V744Q814 817 740 817H284Q209 817 209 742Z" fill="url(#tray)" stroke="#7cceff" stroke-width="5"/>
-  <path d="M220 578Q220 561 239 561H272Q289 561 289 580V686Q289 725 331 725H693Q735 725 735 686V580Q735 561 753 561H784Q803 561 803 581" fill="none" stroke="#e2f6ff" stroke-opacity=".67" stroke-width="5"/>
-  <path d="M332 711H693" stroke="#36eaff" stroke-width="9" stroke-linecap="round" filter="url(#smallGlow)"/>
-  <path d="M332 711H693" stroke="#5beaff" stroke-width="3" stroke-linecap="round"/>
- </g>
- <rect x="55" y="55" width="914" height="914" rx="205" fill="none" stroke="#89dcff" stroke-opacity=".4" stroke-width="3"/>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="172" y1="112" x2="1078" y2="1136" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#173A92"/>
+      <stop offset="0.13" stop-color="#0A286E"/>
+      <stop offset="0.42" stop-color="#031C5B"/>
+      <stop offset="0.78" stop-color="#02143E"/>
+      <stop offset="1" stop-color="#010D2D"/>
+    </linearGradient>
+    <radialGradient id="centerBlue" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(622 570) rotate(90) scale(510 420)">
+      <stop offset="0" stop-color="#082A89" stop-opacity="0.38"/>
+      <stop offset="0.5" stop-color="#06206A" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#02103A" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="outerStroke" x1="78" y1="96" x2="1174" y2="1174" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#64D7FF"/>
+      <stop offset="0.35" stop-color="#2786FF"/>
+      <stop offset="0.72" stop-color="#175FFF"/>
+      <stop offset="1" stop-color="#22FFFF"/>
+    </linearGradient>
+    <linearGradient id="innerStroke" x1="92" y1="100" x2="1150" y2="1150" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D1F7FF"/>
+      <stop offset="0.15" stop-color="#48A4FF"/>
+      <stop offset="0.72" stop-color="#234FEA"/>
+      <stop offset="1" stop-color="#43D7FF"/>
+    </linearGradient>
+
+    <linearGradient id="arrowFill" x1="446" y1="273" x2="724" y2="845" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9BEEFF"/>
+      <stop offset="0.33" stop-color="#53BCFF"/>
+      <stop offset="0.72" stop-color="#1D73FF"/>
+      <stop offset="1" stop-color="#4CEDE7"/>
+    </linearGradient>
+    <linearGradient id="arrowOutline" x1="470" y1="261" x2="730" y2="826" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F9FFFF"/>
+      <stop offset="0.4" stop-color="#C4F8FF"/>
+      <stop offset="1" stop-color="#81FFF1"/>
+    </linearGradient>
+
+    <linearGradient id="trayBase" x1="291" y1="719" x2="970" y2="962" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C9D9FF"/>
+      <stop offset="0.18" stop-color="#A6C0FA"/>
+      <stop offset="0.48" stop-color="#4A6BDC"/>
+      <stop offset="0.83" stop-color="#284FC6"/>
+      <stop offset="1" stop-color="#305DCF"/>
+    </linearGradient>
+    <linearGradient id="trayOutline" x1="294" y1="720" x2="966" y2="955" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EBF3FF"/>
+      <stop offset="0.16" stop-color="#8CEBFF"/>
+      <stop offset="0.65" stop-color="#2875FF"/>
+      <stop offset="1" stop-color="#42E5FF"/>
+    </linearGradient>
+    <linearGradient id="bar1" x1="320" y1="381" x2="320" y2="612" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#114EBE" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#001A53" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="bar2" x1="404" y1="275" x2="404" y2="540" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#82F6FF"/>
+      <stop offset="0.7" stop-color="#0065FF"/>
+      <stop offset="1" stop-color="#001D56" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="bar3" x1="486" y1="225" x2="486" y2="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#236BFF"/>
+      <stop offset="1" stop-color="#001C52" stop-opacity="0.08"/>
+    </linearGradient>
+
+    <radialGradient id="centerGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(627 632) rotate(90) scale(280 280)">
+      <stop offset="0" stop-color="#0F74FF" stop-opacity="0.56"/>
+      <stop offset="0.72" stop-color="#0F5CFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#0F5CFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bottomGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(627 890) rotate(90) scale(56 190)">
+      <stop offset="0" stop-color="#61FFF6"/>
+      <stop offset="1" stop-color="#0B76FF" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="badgeGlow" x="40" y="40" width="1174" height="1174" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="20" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.04 0 0 0 0 0.43 0 0 0 0 1 0 0 0 1 0"/>
+    </filter>
+    <filter id="arrowGlow" x="324" y="218" width="606" height="671" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="26" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.05 0 0 0 0 0.37 0 0 0 0 1 0 0 0 1 0"/>
+    </filter>
+    <filter id="trayGlow" x="196" y="638" width="860" height="370" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="18" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.02 0 0 0 0 0.38 0 0 0 0 1 0 0 0 1 0"/>
+    </filter>
+    <filter id="softBlur" x="0" y="0" width="1254" height="1254" filterUnits="userSpaceOnUse"><feGaussianBlur stdDeviation="7"/></filter>
+    <clipPath id="clip"><rect x="80" y="80" width="1094" height="1094" rx="220"/></clipPath>
+  </defs>
+
+  <rect x="92" y="92" width="1070" height="1070" rx="214" stroke="#1C78FF" stroke-width="10" opacity="0.9" filter="url(#badgeGlow)"/>
+  <rect x="80" y="80" width="1094" height="1094" rx="220" fill="url(#bgGrad)"/>
+  <rect x="80" y="80" width="1094" height="1094" rx="220" fill="url(#centerBlue)"/>
+  <g clip-path="url(#clip)">
+    <ellipse cx="260" cy="160" rx="250" ry="120" transform="rotate(-18 260 160)" fill="#EFFFFF" opacity="0.13" filter="url(#softBlur)"/>
+    <ellipse cx="627" cy="980" rx="430" ry="145" fill="#010D31" opacity="0.45"/>
+  </g>
+  <rect x="87" y="87" width="1080" height="1080" rx="215" stroke="url(#outerStroke)" stroke-width="10"/>
+  <rect x="100" y="100" width="1054" height="1054" rx="204" stroke="url(#innerStroke)" stroke-width="3.5" opacity="0.85"/>
+
+  <circle cx="627" cy="632" r="230" fill="url(#centerGlow)"/>
+
+  <rect x="302" y="378" width="39" height="232" rx="19.5" fill="url(#bar1)"/>
+  <rect x="385" y="277" width="38" height="263" rx="19" fill="url(#bar2)"/>
+  <rect x="467" y="226" width="40" height="241" rx="20" fill="url(#bar3)"/>
+
+  <g filter="url(#arrowGlow)">
+    <path d="M561 286C561 269 574 256 591 256H663C680 256 693 269 693 286V560H842C876 560 892 601 868 625L652 841C638 855 616 855 602 841L386 625C362 601 378 560 412 560H561V286Z" fill="#0059FF" opacity="0.95"/>
+  </g>
+  <path d="M561 286C561 269 574 256 591 256H663C680 256 693 269 693 286V560H842C876 560 892 601 868 625L652 841C638 855 616 855 602 841L386 625C362 601 378 560 412 560H561V286Z" fill="url(#arrowFill)"/>
+  <path d="M561 286C561 269 574 256 591 256H663C680 256 693 269 693 286V560H842C876 560 892 601 868 625L652 841C638 855 616 855 602 841L386 625C362 601 378 560 412 560H561V286Z" stroke="url(#arrowOutline)" stroke-width="4" opacity="0.95"/>
+  <path d="M579 288C579 279 586 272 595 272H658C667 272 674 279 674 288V391" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="10" stroke-linecap="round"/>
+
+  <g filter="url(#trayGlow)">
+    <path d="M321 740V855C321 900 358 937 403 937H851C896 937 933 900 933 855V740" stroke="#0E74FF" stroke-width="110" stroke-linecap="round" stroke-linejoin="round" opacity="0.98"/>
+  </g>
+  <path d="M321 740V855C321 900 358 937 403 937H851C896 937 933 900 933 855V740" stroke="url(#trayBase)" stroke-width="104" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M321 740V855C321 900 358 937 403 937H851C896 937 933 900 933 855V740" stroke="url(#trayOutline)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+  <path d="M332 741V854C332 893 364 925 403 925H851C890 925 922 893 922 854V741" stroke="#FFFFFF" stroke-opacity="0.42" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <ellipse cx="627" cy="887" rx="150" ry="18" fill="#65FFF6" opacity="0.98" filter="url(#softBlur)"/>
+  <ellipse cx="627" cy="886" rx="106" ry="8" fill="#66FFF7" opacity="0.96"/>
+  <ellipse cx="627" cy="888" rx="230" ry="54" fill="url(#bottomGlow)" opacity="0.85"/>
 </svg>

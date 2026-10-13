@@ -31,6 +31,8 @@ pub struct MediaOffer {
 pub struct App {
     /// The app icon for the sidebar header, at the pixel size of the current display scale.
     logo: Option<(u32, egui::TextureHandle)>,
+    /// The logo artwork for the sidebar header: (width px, dark theme, texture).
+    brand: Option<(u32, bool, egui::TextureHandle)>,
     pub rt: tokio::runtime::Handle,
     pub manager: Manager,
     ui_rx: mpsc::UnboundedReceiver<UiRequest>,
@@ -83,6 +85,7 @@ impl App {
         let logo = None;
         let mut app = Self {
             logo,
+            brand: None,
             rt,
             manager,
             ui_rx,
@@ -222,13 +225,37 @@ impl App {
 
     // ------------------------------------------------------------- sidebar
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, items: &[Item]) {
+    /// Sidebar header: the logo artwork (icon + lettering), rendered from the SVG at the
+    /// exact pixel size of the display; a light-theme variant keeps the lettering readable.
+    fn sidebar_logo(&mut self, ui: &mut egui::Ui) {
+        let ppp = ui.ctx().pixels_per_point();
+        let dark = ui.visuals().dark_mode;
+        let w_pt = (ui.available_width() - 4.0).clamp(120.0, 260.0);
+        let (w_px, h_px) = ((w_pt * ppp).round() as u32, (w_pt * ppp / LOGO_ASPECT).round() as u32);
+        if self.brand.as_ref().map(|(w, d, _)| (*w, *d)) != Some((w_px, dark)) {
+            let svg = if dark { LOGO_WIDE_DARK } else { LOGO_WIDE_LIGHT };
+            self.brand = render_svg(ui.ctx(), svg, w_px, h_px, &format!("rdm-brand-{w_px}-{dark}")).map(|t| (w_px, dark, t));
+        }
+        let size = vec2(w_px as f32 / ppp, h_px as f32 / ppp);
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), size.y), Sense::hover());
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let rect = Rect::from_min_size(pos2(snap(row.left() + 2.0), snap(row.top())), size);
+        match &self.brand {
+            Some((_, _, tex)) => {
+                ui.painter().image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            None => self.sidebar_header_text(ui),
+        }
+    }
+
+    /// Previous sidebar header: app icon + "RDM" (blue M) + tagline. Not used now.
+    #[allow(dead_code)]
+    fn sidebar_header_text(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(ui);
-        ui.add_space(16.0);
         // Brand: glowing logo tile with a soft highlight, name and tagline centred on it.
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
-        // The icon is pre-rendered at each display scale and drawn 1:1 on the pixel grid,
-        // so it is never resampled on screen.
+        // The icon is rendered from the SVG at the display's exact pixel size and drawn 1:1 on
+        // the pixel grid, so it stays sharp at any scale.
         let ppp = ui.ctx().pixels_per_point();
         let px = logo_pixels(50.0 * ppp);
         if self.logo.as_ref().map(|(s, _)| *s) != Some(px) {
@@ -257,6 +284,14 @@ impl App {
         let galley = painter.layout_job(job);
         painter.galley(pos2(tx, row.center().y + 1.0 - galley.size().y), galley, p.text);
         painter.text(pos2(tx + 1.0, row.center().y + 4.0), Align2::LEFT_TOP, "Download Manager", FontId::proportional(11.5), p.text_dim);
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui, items: &[Item]) {
+        let p = theme::palette(ui);
+        ui.add_space(16.0);
+        // Brand: the RDM logo artwork. (The previous icon + "RDM" text header is kept in
+        // `sidebar_header_text`; call that here instead to switch back.)
+        self.sidebar_logo(ui);
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -1005,25 +1040,34 @@ impl eframe::App for App {
     }
 }
 
-/// Pre-rendered sizes of the sidebar icon (50 points at 100%–300% display scale).
-const LOGOS: &[(u32, &[u8])] = &[
-    (50, include_bytes!("../assets/logo-50.png")),
-    (63, include_bytes!("../assets/logo-63.png")),
-    (75, include_bytes!("../assets/logo-75.png")),
-    (88, include_bytes!("../assets/logo-88.png")),
-    (100, include_bytes!("../assets/logo-100.png")),
-    (125, include_bytes!("../assets/logo-125.png")),
-    (150, include_bytes!("../assets/logo-150.png")),
-];
+/// The app icon (vector), rendered at exactly the pixel size the display needs.
+const LOGO_SVG: &[u8] = include_bytes!("../assets/rdm_icon.svg");
 
-/// The pre-rendered size closest to `want` pixels.
+/// Pixel size for the sidebar icon at the current display scale.
 fn logo_pixels(want: f32) -> u32 {
-    LOGOS.iter().map(|(s, _)| *s).min_by(|a, b| (*a as f32 - want).abs().total_cmp(&(*b as f32 - want).abs())).unwrap_or(50)
+    want.round().clamp(16.0, 1024.0) as u32
 }
 
 fn load_logo(ctx: &egui::Context, px: u32) -> Option<egui::TextureHandle> {
-    let bytes = LOGOS.iter().find(|(s, _)| *s == px)?.1;
-    let icon = eframe::icon_data::from_png_bytes(bytes).ok()?;
-    let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-    Some(ctx.load_texture(format!("rdm-logo-{px}"), img, egui::TextureOptions::LINEAR))
+    render_svg(ctx, LOGO_SVG, px, px, &format!("rdm-logo-{px}"))
+}
+
+/// The logo artwork (icon + lettering); the light copy has darker lettering for light theme.
+const LOGO_WIDE_DARK: &[u8] = include_bytes!("../assets/rdm_logo.svg");
+const LOGO_WIDE_LIGHT: &[u8] = include_bytes!("../assets/rdm_logo_light.svg");
+/// Width / height of the logo artwork.
+const LOGO_ASPECT: f32 = 1320.0 / 500.0;
+
+/// Rasterize an SVG to exactly w x h pixels (fit, centred) as a texture.
+fn render_svg(ctx: &egui::Context, svg: &[u8], w: u32, h: u32, name: &str) -> Option<egui::TextureHandle> {
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).ok()?;
+    let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
+    let size = tree.size();
+    let scale = (w as f32 / size.width()).min(h as f32 / size.height());
+    let (dx, dy) = ((w as f32 - size.width() * scale) / 2.0, (h as f32 - size.height() * scale) / 2.0);
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale).post_translate(dx, dy), &mut pixmap.as_mut());
+    // tiny-skia pixmaps are premultiplied RGBA, like egui textures.
+    let img = egui::ColorImage::from_rgba_premultiplied([w.max(1) as usize, h.max(1) as usize], pixmap.data());
+    Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
 }

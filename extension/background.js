@@ -474,7 +474,7 @@ function updateBadge(tabId) {
   const n = mediaCount(tabId);
   try {
     api.action.setBadgeText({ tabId, text: n ? String(n) : "" });
-    api.action.setBadgeBackgroundColor({ tabId, color: "#5b7cff" });
+    api.action.setBadgeBackgroundColor({ tabId, color: "#2a86ff" });
   } catch {}
 }
 

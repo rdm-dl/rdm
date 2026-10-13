@@ -20,8 +20,9 @@
       backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: background .15s, transform .15s;
       white-space: nowrap;
     }
-    .btn:hover { background: rgba(28, 33, 44, 0.94); transform: translateY(-1px); }
-    .ico { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: #5b7cff; color: #fff; flex: none; }
+    .btn:hover { background: rgba(28, 33, 44, 0.94); border-color: rgba(42, 134, 255, 0.55); transform: translateY(-1px); }
+    .ico.fallback { display: grid; place-items: center; border-radius: 50%; background: #2a86ff; color: #fff; }
+    .ico { display: block; width: 26px; height: 26px; flex: none; filter: drop-shadow(0 1px 4px rgba(42, 134, 255, 0.45)); }
     .label { padding-right: 2px; }
     .count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: rgba(255,255,255,.14); font-size: 11px; display: grid; place-items: center; }
     .count:empty { display: none; }
@@ -39,8 +40,8 @@
     .menu[hidden] { display: none; }
     .head { padding: 8px 10px 6px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: #8b93a5; }
     .item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-    .item:hover { background: rgba(91, 124, 255, 0.18); }
-    .q { flex: none; min-width: 52px; padding: 3px 7px; border-radius: 6px; background: rgba(91,124,255,.22); color: #c9d4ff; font-size: 12px; font-weight: 600; text-align: center; }
+    .item:hover { background: rgba(42, 134, 255, 0.18); }
+    .q { flex: none; min-width: 52px; padding: 3px 7px; border-radius: 6px; background: rgba(42,134,255,.22); color: #cfe4ff; font-size: 12px; font-weight: 600; text-align: center; }
     .meta { flex: 1; min-width: 0; color: #c3c8d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .note { padding: 10px; color: #8b93a5; line-height: 1.45; }
     .bad { color: #f58b8c; }
@@ -107,8 +108,17 @@
     const wrap = el("div", "wrap");
     btn = el("button", "btn");
     btn.type = "button";
-    const ico = el("span", "ico");
-    ico.innerHTML = ICON;
+    // The RDM app icon (falls back to a drawn arrow if the page blocks extension images).
+    const ico = el("img", "ico");
+    ico.alt = "";
+    try {
+      ico.src = api.runtime.getURL("icons/icon32.png");
+    } catch {}
+    ico.addEventListener("error", () => {
+      const fallback = el("span", "ico fallback");
+      fallback.innerHTML = ICON;
+      ico.replaceWith(fallback);
+    });
     label = el("span", "label", "Download this video");
     count = el("span", "count", mediaCount ? String(mediaCount) : "");
     const x = el("span", "x", "×");
