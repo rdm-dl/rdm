@@ -36,7 +36,9 @@
   }
 
   // ---- YouTube: the player's own data (formats, qualities, title).
-  const YT = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtube\.googleapis\.com)$/.test(location.hostname);
+  // Store builds that may not offer YouTube downloads set this to false (tools/store_packages.py).
+  const YOUTUBE_SUPPORT = true;
+  const YT = YOUTUBE_SUPPORT && /(^|\.)(youtube\.com|youtube-nocookie\.com|youtube\.googleapis\.com)$/.test(location.hostname);
   const PLAYER_API = /\/youtubei\/v1\/player\b/;
   let lastYt = "";
 

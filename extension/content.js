@@ -28,7 +28,7 @@
     .x { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: #aeb5c4; font-size: 15px; line-height: 1; }
     .x:hover { background: rgba(255,255,255,.12); color: #fff; }
     .menu {
-      position: absolute; top: 40px; right: 0; width: 310px; max-height: 360px; overflow: auto; padding: 6px;
+      position: absolute; top: 40px; right: 0; width: 310px; max-height: min(420px, 80vh); overflow: auto; padding: 6px;
       background: rgba(18, 21, 28, 0.96); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 14px;
       box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
     }

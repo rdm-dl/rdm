@@ -37,6 +37,10 @@ impl Default for Grabber {
 }
 
 impl Grabber {
+    pub fn set_start_url(&mut self, url: &str) {
+        self.project.start_url = url.to_string();
+    }
+
     pub fn set_mirror_dir(&mut self, dir: std::path::PathBuf) {
         self.mirror_dir = dir.display().to_string();
     }

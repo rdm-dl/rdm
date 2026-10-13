@@ -2,3 +2,8 @@
 *.part
 /dist
 /.work
+
+# Brand source files dropped in the root (copies live in assets/brand)
+/rdm_icon.png
+/rdm_logo.png
+/RDM_Download_Manager_*.svg

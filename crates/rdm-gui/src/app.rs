@@ -52,6 +52,8 @@ pub struct App {
     pub ext_help: Option<crate::extension_help::ExtensionHelp>,
     /// The setup banner was closed this session.
     ext_banner_hidden: bool,
+    /// RDM_SCREENSHOT=<window>: open that window once at start-up (documentation screenshots).
+    screenshot: Option<String>,
     progress_windows: BTreeSet<ItemId>,
     completed: VecDeque<ItemId>,
     confirm_delete: Option<Vec<ItemId>>,
@@ -92,6 +94,7 @@ impl App {
             brand: None,
             ext_help: None,
             ext_banner_hidden: false,
+            screenshot: std::env::var("RDM_SCREENSHOT").ok().filter(|s| !s.is_empty()),
             rt,
             manager,
             ui_rx,
@@ -135,6 +138,50 @@ impl App {
 
     pub fn flash(&mut self, msg: impl Into<String>) {
         self.status_msg = Some((msg.into(), Instant::now()));
+    }
+
+    /// Screenshot mode: open the requested window once its content is available.
+    fn open_screenshot_window(&mut self) {
+        let Some(which) = self.screenshot.clone() else { return };
+        let done = match which.as_str() {
+            "options" => {
+                self.options = Some(Options::new(&self.manager));
+                true
+            }
+            "scheduler" => {
+                self.scheduler = Some(Scheduler::new(&self.manager));
+                true
+            }
+            "grabber" => {
+                let mut g = Grabber::default();
+                g.set_mirror_dir(self.manager.settings().download_dir.join("Websites"));
+                g.set_start_url("https://example.com/gallery/");
+                self.grabber = Some(g);
+                true
+            }
+            "extension" => {
+                self.ext_help = Some(crate::extension_help::ExtensionHelp::new());
+                true
+            }
+            "new" => {
+                self.new_download();
+                if let Some(d) = self.add_url.as_mut() {
+                    d.url = "https://releases.example.com/linux/distro-26.04-desktop-amd64.iso".into();
+                }
+                true
+            }
+            "details" => match self.manager.items().into_iter().find(|i| i.state == ItemState::Running && i.downloaded > 0) {
+                Some(it) => {
+                    self.progress_windows.insert(it.id);
+                    true
+                }
+                None => false,
+            },
+            _ => true,
+        };
+        if done {
+            self.screenshot = None;
+        }
     }
 
     fn new_download(&mut self) {
@@ -214,7 +261,7 @@ impl App {
             .filter(|i| q.is_empty() || i.file_name.to_lowercase().contains(&q) || i.request.url.to_lowercase().contains(&q))
             .cloned()
             .collect();
-        v.sort_by_key(|i| std::cmp::Reverse(i.added));
+        v.sort_by_key(|i| std::cmp::Reverse((i.added, i.id)));
         v
     }
 
@@ -1039,6 +1086,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.open_screenshot_window();
         let ctx = ui.ctx().clone();
         let p = theme::palette(ui);
         let all = self.manager.items();

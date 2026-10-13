@@ -38,7 +38,9 @@ function button(text, onClick) {
 }
 
 async function init() {
-  const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+  // popup.html?tab=<id> shows another tab's media (used when the popup is opened as a page).
+  const forced = +new URLSearchParams(location.search).get("tab");
+  const [tab] = forced ? [await api.tabs.get(forced)] : await api.tabs.query({ active: true, currentWindow: true });
   const state = await api.runtime.sendMessage({ type: "state", tabId: tab?.id, pageUrl: tab?.url });
   const status = document.getElementById("status");
   status.textContent = state.connected ? "Connected to RDM" : "RDM not reachable — open the app";

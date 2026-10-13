@@ -921,7 +921,11 @@ function videoIdOf(pageUrl) {
   }
 }
 
+// Store builds that may not offer YouTube downloads set this to false (tools/store_packages.py).
+const YOUTUBE_SUPPORT = true;
+
 function ytList(tabId, pageUrl) {
+  if (!YOUTUBE_SUPPORT) return [];
   const videos = yt.get(tabId);
   if (!videos || !videos.size) return [];
   const id = pageUrl ? videoIdOf(pageUrl) : "";

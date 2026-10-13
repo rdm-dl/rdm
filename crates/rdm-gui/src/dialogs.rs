@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 // ---------------------------------------------------------------- Add URL
 
 pub struct AddUrl {
-    url: String,
+    pub url: String,
     use_auth: bool,
     user: String,
     pass: String,
@@ -256,7 +256,7 @@ fn add_url(app: &mut App, ctx: &egui::Context) {
     let Some(d) = app.add_url.as_mut() else { return };
     let mut close = false;
     let mut ok = false;
-    egui::Window::new("Enter new address to download").resizable(false).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
+    egui::Window::new("Enter new address to download").min_width(520.0).resizable(false).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label("Address:");
             let r = ui.add(egui::TextEdit::singleline(&mut d.url).desired_width(420.0));
@@ -494,7 +494,7 @@ fn options(app: &mut App, ctx: &egui::Context) {
     let mut close = false;
     let mut apply = false;
     let mut open_ext_help = false;
-    egui::Window::new("Options").default_size([640.0, 460.0]).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
+    egui::Window::new("Options").default_size([720.0, 480.0]).min_width(700.0).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.horizontal_wrapped(|ui| {
             for (t, n) in [
                 (Tab::General, "General"),
