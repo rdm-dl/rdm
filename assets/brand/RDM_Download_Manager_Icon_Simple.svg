@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Simplified RDM icon for small sizes (taskbar, tray, browser tabs/toolbar): the same
+     tile, arrow and tray as RDM_Download_Manager_Icon.svg, without glows, speed lines,
+     second outline and highlights, so it stays crisp at 16–48 px. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254" fill="none">
+  <defs>
+    <linearGradient id="tile" x1="172" y1="112" x2="1078" y2="1136" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#123A8F"/>
+      <stop offset="1" stop-color="#051A4D"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="627" y1="256" x2="627" y2="851" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9FE4FF"/>
+      <stop offset="1" stop-color="#2A86FF"/>
+    </linearGradient>
+    <linearGradient id="tray" x1="321" y1="740" x2="933" y2="937" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C9DCFF"/>
+      <stop offset="1" stop-color="#5C8DF5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile and a single border -->
+  <rect x="80" y="80" width="1094" height="1094" rx="220" fill="url(#tile)"/>
+  <rect x="98" y="98" width="1058" height="1058" rx="204" stroke="#2A86FF" stroke-width="36"/>
+
+  <!-- Arrow -->
+  <path d="M561 286C561 269 574 256 591 256H663C680 256 693 269 693 286V560H842C876 560 892 601 868 625L652 841C638 855 616 855 602 841L386 625C362 601 378 560 412 560H561V286Z" fill="url(#arrow)"/>
+
+  <!-- Tray -->
+  <path d="M321 740V855C321 900 358 937 403 937H851C896 937 933 900 933 855V740" stroke="url(#tray)" stroke-width="112" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
