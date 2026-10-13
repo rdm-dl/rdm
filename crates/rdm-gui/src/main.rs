@@ -4,6 +4,7 @@
 mod app;
 mod bridge;
 mod dialogs;
+mod extension_help;
 mod grabber_ui;
 mod theme;
 mod tray;

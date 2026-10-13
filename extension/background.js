@@ -555,7 +555,16 @@ async function downloadMedia(msg, tab) {
 const yt = new Map(); // tabId -> Map(videoId -> info)
 const diagLog = []; // recent events, for diagnostics
 
+// Diagnostics are off unless switched on for troubleshooting:
+// chrome.storage.local.set({ diagnostics: true }) in the extension's service worker console.
+let diagnosticsOn = false;
+api.storage.local.get("diagnostics").then((s) => (diagnosticsOn = s.diagnostics === true), () => {});
+api.storage.onChanged.addListener((c) => {
+  if (c.diagnostics) diagnosticsOn = c.diagnostics.newValue === true;
+});
+
 function diag(event, detail) {
+  if (!diagnosticsOn) return;
   diagLog.push({ t: new Date().toISOString().slice(11, 23), event, ...detail });
   if (diagLog.length > 300) diagLog.splice(0, diagLog.length - 300);
   scheduleDiag();

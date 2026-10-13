@@ -48,6 +48,10 @@ pub struct App {
     pub scheduler: Option<Scheduler>,
     pub speed_limit: Option<SpeedLimit>,
     pub grabber: Option<Grabber>,
+    /// "Install the browser extension" helper window.
+    pub ext_help: Option<crate::extension_help::ExtensionHelp>,
+    /// The setup banner was closed this session.
+    ext_banner_hidden: bool,
     progress_windows: BTreeSet<ItemId>,
     completed: VecDeque<ItemId>,
     confirm_delete: Option<Vec<ItemId>>,
@@ -86,6 +90,8 @@ impl App {
         let mut app = Self {
             logo,
             brand: None,
+            ext_help: None,
+            ext_banner_hidden: false,
             rt,
             manager,
             ui_rx,
@@ -286,6 +292,29 @@ impl App {
         painter.text(pos2(tx + 1.0, row.center().y + 4.0), Align2::LEFT_TOP, "Download Manager", FontId::proportional(11.5), p.text_dim);
     }
 
+    /// Until the browser extension has connected once: a slim card pointing to the helper.
+    fn extension_banner(&mut self, ui: &mut egui::Ui) {
+        if self.ext_banner_hidden || self.manager.settings().extension_connected_once || rdm_core::ipc::last_extension_contact().is_some() {
+            return;
+        }
+        let p = theme::palette(ui);
+        egui::Frame::new().fill(p.accent_soft).corner_radius(CornerRadius::same(12)).inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(theme::ic(icon::PUZZLE_PIECE).size(18.0).color(p.accent));
+                ui.label(RichText::new("Add the RDM extension to your browser to catch downloads and videos automatically.").color(p.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, icon::X, "Hide").clicked() {
+                        self.ext_banner_hidden = true;
+                    }
+                    if theme::button(ui, Kind::Primary, icon::PUZZLE_PIECE, "Set up", true).clicked() {
+                        self.ext_help = Some(crate::extension_help::ExtensionHelp::new());
+                    }
+                });
+            });
+        });
+        ui.add_space(10.0);
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui, items: &[Item]) {
         let p = theme::palette(ui);
         ui.add_space(16.0);
@@ -375,6 +404,9 @@ impl App {
                         let mut g = Grabber::default();
                         g.set_mirror_dir(self.manager.settings().download_dir.join("Websites"));
                         self.grabber = Some(g);
+                    }
+                    if ui.button(theme::mi(icon::PUZZLE_PIECE, "Install browser extension…")).clicked() {
+                        self.ext_help = Some(crate::extension_help::ExtensionHelp::new());
                     }
                     if ui.button(theme::mi(icon::LIST_CHECKS, "Batch download…")).clicked() {
                         self.batch = Some(Batch::default());
@@ -1025,7 +1057,10 @@ impl eframe::App for App {
             .show(ui, |ui| self.header(ui, &visible));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin { left: 22, right: 22, top: 12, bottom: 4 }))
-            .show(ui, |ui| self.list(ui, &visible));
+            .show(ui, |ui| {
+                self.extension_banner(ui);
+                self.list(ui, &visible)
+            });
 
         let ids: Vec<ItemId> = self.progress_windows.iter().copied().collect();
         for id in ids {
@@ -1035,6 +1070,7 @@ impl eframe::App for App {
         }
         dialogs::show_all(self, &ctx);
         crate::grabber_ui::show(self, &ctx);
+        crate::extension_help::show(self, &ctx);
         self.popups(&ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
     }

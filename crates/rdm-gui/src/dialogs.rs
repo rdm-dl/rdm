@@ -493,6 +493,7 @@ fn options(app: &mut App, ctx: &egui::Context) {
     let Some(o) = app.options.as_mut() else { return };
     let mut close = false;
     let mut apply = false;
+    let mut open_ext_help = false;
     egui::Window::new("Options").default_size([640.0, 460.0]).collapsible(false).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(ctx, |ui| {
         ui.horizontal_wrapped(|ui| {
             for (t, n) in [
@@ -524,6 +525,9 @@ fn options(app: &mut App, ctx: &egui::Context) {
                             Ok(m) => m,
                             Err(e) => format!("Failed: {e}"),
                         });
+                    }
+                    if ui.button("Install browser extension…").clicked() {
+                        open_ext_help = true;
                     }
                     if ui.button("Remove browser integration").clicked() {
                         o.bridge_msg = Some(crate::bridge::unregister());
@@ -708,6 +712,9 @@ fn options(app: &mut App, ctx: &egui::Context) {
     }
     if close {
         app.options = None;
+    }
+    if open_ext_help {
+        app.ext_help = Some(crate::extension_help::ExtensionHelp::new());
     }
 }
 

@@ -187,6 +187,8 @@ pub struct Settings {
     pub categories: Vec<Category>,
     pub queues: Vec<QueueDef>,
     pub capture: CaptureSettings,
+    /// The browser extension has connected at least once (hides the setup banner).
+    pub extension_connected_once: bool,
     pub proxy: ProxySettings,
     pub logins: Vec<SiteLogin>,
     pub quota: Quota,
@@ -215,6 +217,7 @@ impl Default for Settings {
             categories: default_categories(),
             queues: default_queues(),
             capture: CaptureSettings::default(),
+            extension_connected_once: false,
             proxy: ProxySettings { mode: "system".into(), ..Default::default() },
             logins: vec![],
             quota: Quota { enabled: false, megabytes: 1024, hours: 4 },

@@ -9,6 +9,16 @@ use crate::manager::{AddOptions, ItemId, ItemState, Manager};
 use crate::settings::CaptureSettings;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// When the browser extension last talked to RDM (unix seconds; 0 = not this session).
+static LAST_EXTENSION_CONTACT: AtomicI64 = AtomicI64::new(0);
+
+/// Unix time of the browser extension's last contact in this session, if any.
+pub fn last_extension_contact() -> Option<i64> {
+    let v = LAST_EXTENSION_CONTACT.load(Ordering::Relaxed);
+    (v > 0).then_some(v)
+}
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -188,7 +198,16 @@ fn dispatch(m: &Manager, ui: Option<&mpsc::UnboundedSender<UiRequest>>, req: Req
                 })
                 .collect(),
         },
-        Request::Capture => Response::Capture { settings: m.settings().capture },
+        Request::Capture => {
+            // The extension asks for its settings when it starts and every few minutes.
+            LAST_EXTENSION_CONTACT.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+            let mut s = m.settings();
+            if !s.extension_connected_once {
+                s.extension_connected_once = true;
+                m.set_settings(s.clone());
+            }
+            Response::Capture { settings: s.capture }
+        }
         Request::Media { request, title, kind } => {
             if let Some(ui) = ui {
                 let _ = ui.send(UiRequest::Media { request, title, kind });
