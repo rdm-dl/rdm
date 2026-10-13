@@ -11,15 +11,15 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jaylex32/rdm/releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/jaylex32/rdm?label=download&color=2A86FF"></a>
-  <a href="https://github.com/jaylex32/rdm/actions"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/jaylex32/rdm/release.yml?branch=main"></a>
+  <a href="https://github.com/rdm-dl/rdm/releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/rdm-dl/rdm?label=download&color=2A86FF"></a>
+  <a href="https://github.com/rdm-dl/rdm/actions"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/rdm-dl/rdm/release.yml?branch=main"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-1673F0">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
 <p align="center">
-  <a href="https://jaylex32.github.io/rdm/">Website</a> ·
-  <a href="https://github.com/jaylex32/rdm/releases/latest">Download</a> ·
+  <a href="https://rdm-dl.github.io/">Website</a> ·
+  <a href="https://github.com/rdm-dl/rdm/releases/latest">Download</a> ·
   <a href="#browser-extension">Browser extension</a> ·
   <a href="#build-from-source">Build from source</a>
 </p>
@@ -72,7 +72,7 @@
 
 ## Install
 
-Download the archive for your system from the [latest release](https://github.com/jaylex32/rdm/releases/latest).
+Download the archive for your system from the [latest release](https://github.com/rdm-dl/rdm/releases/latest).
 
 | System | File | Run |
 |---|---|---|
@@ -137,7 +137,7 @@ Pushing a `v*` tag builds Windows, Linux and macOS archives with GitHub Actions 
 
 ## Privacy
 
-RDM and its extension do not collect, store or send any data anywhere. The extension only talks to the RDM app on your own computer. See the [privacy policy](https://jaylex32.github.io/rdm/privacy.html).
+RDM and its extension do not collect, store or send any data anywhere. The extension only talks to the RDM app on your own computer. See the [privacy policy](https://rdm-dl.github.io/privacy.html).
 
 ## License
 

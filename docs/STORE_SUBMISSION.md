@@ -15,8 +15,8 @@ After each store approves the extension, put its ID in `extension/store-ids.json
 You'll also need:
 - **Icon**: `extension/icons/icon128.png`
 - **Screenshots**: 1280×800 PNGs (see "Screenshots" at the end)
-- **Privacy policy URL**: https://jaylex32.github.io/rdm/privacy.html
-- **Website**: https://jaylex32.github.io/rdm/
+- **Privacy policy URL**: https://rdm-dl.github.io/privacy.html
+- **Website**: https://rdm-dl.github.io/
 
 ---
 
@@ -37,7 +37,7 @@ You'll also need:
    - Permission justifications: copy each one from "Permissions" below
    - Remote code: **No, I am not using remote code**
    - Data usage: tick nothing (RDM collects no user data); certify the three statements
-   - Privacy policy URL: https://jaylex32.github.io/rdm/privacy.html
+   - Privacy policy URL: https://rdm-dl.github.io/privacy.html
 5. **Distribution** tab: Public (or Unlisted), all regions.
 6. **Submit for review.** Review usually takes from a few days to a couple of weeks.
 7. When it's published, copy the item ID (the 32-letter ID in the item's URL) into
@@ -48,7 +48,7 @@ You'll also need:
 1. Open Partner Center: https://partner.microsoft.com/dashboard/microsoftedge/overview
 2. **Create new extension** → upload `rdm-edge-addons.zip`.
 3. **Availability**: Public, all markets.
-4. **Properties**: Category `Productivity`, privacy policy URL `https://jaylex32.github.io/rdm/privacy.html`, website `https://jaylex32.github.io/rdm/`.
+4. **Properties**: Category `Productivity`, privacy policy URL `https://rdm-dl.github.io/privacy.html`, website `https://rdm-dl.github.io/`.
 5. **Store listings** → English: description (full description below), extension logo
    300×300 (use `assets/brand` icon), screenshots 1280×800.
 6. **Submit** (notes for certification: "Requires the free RDM desktop app; the extension
