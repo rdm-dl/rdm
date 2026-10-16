@@ -4291,7 +4291,7 @@ dependencies = [
 
 [[package]]
 name = "rdm-bridge"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rdm-core",
  "serde",
@@ -4301,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "rdm-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4313,7 +4313,7 @@ dependencies = [
 
 [[package]]
 name = "rdm-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes",
  "boa_engine",
@@ -4338,7 +4338,7 @@ dependencies = [
 
 [[package]]
 name = "rdm-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arboard",
  "chrono",
@@ -4355,6 +4355,7 @@ dependencies = [
  "tokio",
  "tray-icon",
  "url",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

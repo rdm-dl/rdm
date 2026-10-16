@@ -55,6 +55,7 @@
 ### Integration
 - Browser extension for **Chrome, Edge, Brave, Vivaldi, Opera and Firefox**.
 - System tray icon, close to tray, start with the system, dark and light themes.
+- **Updates itself**: RDM tells you when a new version is out, downloads it and swaps it in; one click restarts into the new version (on macOS it opens the new disk image).
 - `rdm` command-line tool and a headless daemon mode.
 
 ## Screenshots

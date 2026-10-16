@@ -48,6 +48,8 @@ pub struct App {
     pub scheduler: Option<Scheduler>,
     pub speed_limit: Option<SpeedLimit>,
     pub grabber: Option<Grabber>,
+    /// New versions of RDM.
+    pub updater: crate::updater::Updater,
     /// "Install the browser extension" helper window.
     pub ext_help: Option<crate::extension_help::ExtensionHelp>,
     /// The setup banner was closed this session.
@@ -93,6 +95,7 @@ impl App {
             logo,
             brand: None,
             ext_help: None,
+            updater: crate::updater::Updater::new(),
             ext_banner_hidden: false,
             screenshot: std::env::var("RDM_SCREENSHOT").ok().filter(|s| !s.is_empty()),
             rt,
@@ -362,6 +365,138 @@ impl App {
         ui.add_space(10.0);
     }
 
+    /// Sidebar entries, grouped by section: (section, filter, icon, label, count).
+    fn nav_entries(&self, items: &[Item]) -> Vec<(&'static str, Filter, &'static str, String, usize)> {
+        let s = self.manager.settings();
+        let count = |f: &dyn Fn(&Item) -> bool| items.iter().filter(|i| f(i)).count();
+        let mut v = vec![
+            ("Library", Filter::All, icon::SQUARES_FOUR, "All downloads".to_string(), items.len()),
+            ("Library", Filter::Unfinished, icon::HOURGLASS_MEDIUM, "Unfinished".into(), count(&|i| i.state != ItemState::Complete)),
+            ("Library", Filter::Finished, icon::CHECK_CIRCLE, "Completed".into(), count(&|i| i.state == ItemState::Complete)),
+        ];
+        for c in &s.categories {
+            let n = count(&|i| i.category.as_deref() == Some(&c.name));
+            v.push(("Categories", Filter::Category(Some(c.name.clone())), category_icon(&c.name), c.name.clone(), n));
+        }
+        v.push(("Categories", Filter::Category(None), icon::FOLDER_OPEN, "General".into(), count(&|i| i.category.is_none())));
+        for q in &s.queues {
+            let n = count(&|i| i.queue == q.id && i.state != ItemState::Complete);
+            let ic = if self.manager.is_queue_active(q.id) { icon::PLAY_CIRCLE } else { icon::QUEUE };
+            v.push(("Queues", Filter::Queue(q.id), ic, q.name.clone(), n));
+        }
+        v
+    }
+
+    /// (total speed, running count, limit text) for the speed card.
+    fn speed_summary(&self, items: &[Item]) -> (f64, usize, String) {
+        let running = items.iter().filter(|i| i.state == ItemState::Running).count();
+        let total: f64 = items.iter().filter(|i| i.state == ItemState::Running).map(|i| i.speed).sum();
+        let lim = match self.manager.settings().speed_limit {
+            Some(l) => format!("{running} active · limit {}/s", util::size(l)),
+            None => format!("{running} active · no limit"),
+        };
+        (total, running, lim)
+    }
+
+    /// A new version: what's available, download progress, and the restart button.
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        use crate::updater::State;
+        if self.updater.hidden {
+            return;
+        }
+        let st = self.updater.state();
+        let p = theme::palette(ui);
+        let current = crate::updater::current_version();
+        let (ic, color, title, detail, progress) = match &st {
+            State::Available(r) => (icon::ARROW_CIRCLE_UP, p.accent, format!("RDM {} is available", r.version), format!("You have {current}."), None),
+            State::Downloading(r, prog) => {
+                let pr = prog.borrow().clone();
+                let f = pr.total.filter(|t| *t > 0).map(|t| pr.downloaded as f32 / t as f32).unwrap_or(0.0);
+                (icon::DOWNLOAD_SIMPLE, p.accent, format!("Downloading RDM {}…", r.version), format!("{:.0}%", f * 100.0), Some(f))
+            }
+            State::Installing(r) => (icon::GEAR_SIX, p.accent, format!("Installing RDM {}…", r.version), String::new(), Some(1.0)),
+            State::Ready(r) => (
+                icon::CHECK_CIRCLE,
+                p.success,
+                format!("RDM {} is ready", r.version),
+                "Restart RDM to start using it. Downloads in progress pause and pick up again.".into(),
+                None,
+            ),
+            State::Opened(r) => (icon::CHECK_CIRCLE, p.success, format!("RDM {} downloaded", r.version), "Drag RDM onto Applications in the window that opened, then start it again.".into(), None),
+            State::Failed(e, Some(r)) => (icon::WARNING_CIRCLE, p.warning, format!("Couldn't update to RDM {}", r.version), e.clone(), None),
+            _ => return,
+        };
+        let mut restart = false;
+        egui::Frame::new().fill(color.gamma_multiply(0.13)).stroke(Stroke::new(1.0, color.gamma_multiply(0.35))).corner_radius(CornerRadius::same(12)).inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(theme::ic(ic).size(20.0).color(color));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&title).font(theme::semibold(14.0)));
+                    if !detail.is_empty() {
+                        ui.add(egui::Label::new(RichText::new(&detail).size(12.0).color(p.text_dim)).truncate());
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match &st {
+                        State::Available(r) => {
+                            if self.updater.can_install() && r.asset.is_some() {
+                                let label = if rdm_core::update::opens_installer() { "Download" } else { "Update now" };
+                                if theme::button(ui, Kind::Primary, icon::DOWNLOAD_SIMPLE, label, true).clicked() {
+                                    let dir = self.manager.data_dir().to_path_buf();
+                                    self.updater.start(&self.rt, dir);
+                                }
+                            } else if theme::button(ui, Kind::Primary, icon::ARROW_SQUARE_OUT, "Get it", true).clicked() {
+                                util::open_file(std::path::Path::new(&r.page));
+                            }
+                            if theme::button(ui, Kind::Ghost, icon::CLOCK, "Later", true).clicked() {
+                                self.updater.hidden = true;
+                            }
+                            if theme::button(ui, Kind::Ghost, icon::INFO, "What's new", true).clicked() {
+                                util::open_file(std::path::Path::new(&r.page));
+                            }
+                        }
+                        State::Ready(_) => {
+                            if theme::button(ui, Kind::Primary, icon::ARROW_CLOCKWISE, "Restart RDM", true).clicked() {
+                                restart = true;
+                            }
+                            if theme::button(ui, Kind::Ghost, icon::CLOCK, "Later", true).clicked() {
+                                self.updater.hidden = true;
+                            }
+                        }
+                        State::Failed(_, Some(r)) => {
+                            if theme::button(ui, Kind::Primary, icon::ARROW_SQUARE_OUT, "Open download page", true).clicked() {
+                                util::open_file(std::path::Path::new(&r.page));
+                            }
+                            if theme::icon_button(ui, icon::X, "Hide").clicked() {
+                                self.updater.hidden = true;
+                            }
+                        }
+                        State::Opened(_) => {
+                            if theme::icon_button(ui, icon::X, "Hide").clicked() {
+                                self.updater.hidden = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            });
+            if let Some(f) = progress {
+                ui.add_space(4.0);
+                let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 5.0), Sense::hover());
+                theme::progress(ui, bar, f, color);
+            }
+        });
+        ui.add_space(10.0);
+        if restart {
+            if self.updater.restart() {
+                self.exiting = true;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.flash("Couldn't start the new version; start RDM again yourself.");
+            }
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui, items: &[Item]) {
         let p = theme::palette(ui);
         ui.add_space(16.0);
@@ -383,9 +518,7 @@ impl App {
         ui.add_space(12.0);
 
         // Speed card pinned to the bottom.
-        let s = self.manager.settings();
-        let running: Vec<&Item> = items.iter().filter(|i| i.state == ItemState::Running).collect();
-        let total: f64 = running.iter().map(|i| i.speed).sum();
+        let (total, _, lim) = self.speed_summary(items);
         egui::Panel::bottom("speed_card").frame(egui::Frame::new().inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 12 })).show(ui, |ui| {
             theme::card(ui).inner_margin(Margin::same(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -393,42 +526,83 @@ impl App {
                     ui.label(theme::ic(icon::GAUGE).size(20.0).color(p.accent));
                     ui.vertical(|ui| {
                         ui.label(RichText::new(if total >= 1.0 { util::speed(total) } else { "Idle".into() }).font(theme::semibold(15.0)));
-                        let lim = match s.speed_limit {
-                            Some(l) => format!("{} active · limit {}/s", running.len(), util::size(l)),
-                            None => format!("{} active · no limit", running.len()),
-                        };
                         ui.label(RichText::new(lim).size(11.5).color(p.text_dim));
                     });
                 });
             });
         });
-        let count = |f: &dyn Fn(&Item) -> bool| items.iter().filter(|i| f(i)).count();
+        let entries = self.nav_entries(items);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(ui.available_width() - 10.0);
-            theme::caption(ui, "Library");
-            let mut nav = |ui: &mut egui::Ui, f: Filter, ic: &str, label: &str, n: usize| {
-                if theme::nav_item(ui, ic, label, Some(n), self.filter == f).clicked() {
+            let mut section = "";
+            for (sec, f, ic, label, n) in entries {
+                if sec != section {
+                    theme::caption(ui, sec);
+                    section = sec;
+                }
+                let label = theme::elide_end(ui, &label, &FontId::proportional(14.0), ui.available_width() - 90.0);
+                if theme::nav_item(ui, ic, &label, Some(n), self.filter == f).clicked() {
                     self.filter = f;
                     self.selected.clear();
                 }
-            };
-            nav(ui, Filter::All, icon::SQUARES_FOUR, "All downloads", items.len());
-            nav(ui, Filter::Unfinished, icon::HOURGLASS_MEDIUM, "Unfinished", count(&|i| i.state != ItemState::Complete));
-            nav(ui, Filter::Finished, icon::CHECK_CIRCLE, "Completed", count(&|i| i.state == ItemState::Complete));
-            theme::caption(ui, "Categories");
-            for c in &s.categories {
-                let n = count(&|i| i.category.as_deref() == Some(&c.name));
-                nav(ui, Filter::Category(Some(c.name.clone())), category_icon(&c.name), &c.name, n);
-            }
-            nav(ui, Filter::Category(None), icon::FOLDER_OPEN, "General", count(&|i| i.category.is_none()));
-            theme::caption(ui, "Queues");
-            for q in &s.queues {
-                let n = count(&|i| i.queue == q.id && i.state != ItemState::Complete);
-                let ic = if self.manager.is_queue_active(q.id) { icon::PLAY_CIRCLE } else { icon::QUEUE };
-                nav(ui, Filter::Queue(q.id), ic, &q.name, n);
             }
         });
+    }
 
+    /// Narrow window: an icon strip with the same entries (names and counts on hover).
+    fn sidebar_compact(&mut self, ui: &mut egui::Ui, items: &[Item]) {
+        let p = theme::palette(ui);
+        ui.add_space(16.0);
+        // The app icon, sharp at the display's scale.
+        let ppp = ui.ctx().pixels_per_point();
+        let side = 38.0;
+        let px = logo_pixels(side * ppp * SIMPLE_ICON_FULL / SIMPLE_ICON_TILE);
+        if self.logo.as_ref().map(|(s, _)| *s) != Some(px) {
+            self.logo = render_svg(ui.ctx(), SIMPLE_ICON_SVG, px, px, &format!("rdm-icon-simple-{px}")).map(|t| (px, t));
+        }
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), side), Sense::hover());
+        if let Some((_, tex)) = &self.logo {
+            let snap = |v: f32| (v * ppp).round() / ppp;
+            let r = Rect::from_min_size(pos2(snap(row.center().x - side / 2.0), snap(row.top())), vec2(side, side));
+            let (a, b) = (SIMPLE_ICON_CROP / SIMPLE_ICON_FULL, (SIMPLE_ICON_CROP + SIMPLE_ICON_TILE) / SIMPLE_ICON_FULL);
+            ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(a, a), pos2(b, b)), Color32::WHITE);
+        }
+        ui.add_space(16.0);
+        if theme::round_cta(ui, icon::PLUS, "New download").clicked() {
+            self.new_download();
+        }
+        ui.add_space(8.0);
+
+        let (total, running, lim) = self.speed_summary(items);
+        egui::Panel::bottom("speed_card").frame(egui::Frame::new().inner_margin(Margin { left: 0, right: 0, top: 8, bottom: 12 })).show(ui, |ui| {
+            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+            let cell = Rect::from_center_size(r.center(), vec2(48.0, 46.0));
+            ui.painter().rect(cell, CornerRadius::same(12), p.surface, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+            let c = if running > 0 { p.accent } else { p.text_dim };
+            ui.painter().text(pos2(cell.center().x, cell.top() + 15.0), Align2::CENTER_CENTER, icon::GAUGE, theme::icon_font(17.0), c);
+            ui.painter().text(pos2(cell.center().x, cell.bottom() - 11.0), Align2::CENTER_CENTER, running.to_string(), theme::semibold(10.5), c);
+            let speed = if total >= 1.0 { util::speed(total) } else { "Idle".into() };
+            resp.on_hover_text(format!("{speed}\n{lim}"));
+        });
+        let entries = self.nav_entries(items);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+            let mut section = "";
+            for (sec, f, ic, label, n) in entries {
+                if sec != section {
+                    if !section.is_empty() {
+                        ui.add_space(4.0);
+                        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+                        ui.painter().hline((r.center().x - 14.0)..=(r.center().x + 14.0), r.center().y, Stroke::new(1.0, p.border));
+                        ui.add_space(4.0);
+                    }
+                    section = sec;
+                }
+                if theme::nav_icon(ui, ic, &label, Some(n), self.filter == f).clicked() {
+                    self.filter = f;
+                    self.selected.clear();
+                }
+            }
+        });
     }
 
     // ------------------------------------------------------------- header
@@ -501,8 +675,10 @@ impl App {
                     self.manager.start_queue(MAIN_QUEUE);
                 }
                 ui.add_space(6.0);
-                // Search.
-                let search = egui::TextEdit::singleline(&mut self.search).hint_text("Search downloads").desired_width(210.0).margin(vec2(10.0, 7.0));
+                // Search: as wide as the room next to the title allows.
+                let w = (ui.available_width() - 40.0).clamp(110.0, 240.0);
+                let hint = if w < 170.0 { "Search" } else { "Search downloads" };
+                let search = egui::TextEdit::singleline(&mut self.search).hint_text(hint).desired_width(w).margin(vec2(10.0, 7.0));
                 ui.add(search);
                 ui.label(theme::ic(icon::MAGNIFYING_GLASS).color(p.text_dim));
             });
@@ -766,14 +942,12 @@ impl App {
         // Middle: name, details, progress.
         let left = tile.right() + 14.0;
         let text_right = right.left() - 10.0;
-        let name_galley = ui.painter().layout(
-            it.file_name.clone(),
-            theme::semibold(14.5),
-            p.text,
-            (text_right - left).max(50.0),
-        );
-        let name_pos = pos2(left, rect.top() + 12.0);
-        ui.painter().with_clip_rect(Rect::from_min_max(pos2(left, rect.top()), pos2(text_right, rect.bottom()))).galley(name_pos, name_galley, p.text);
+        // One line each; long names lose their middle ("ffmpeg-2026…full_build.7z").
+        let text_w = (text_right - left).max(40.0);
+        let clip = ui.painter().with_clip_rect(Rect::from_min_max(pos2(left, rect.top()), pos2(text_right, rect.bottom())));
+        let name_font = theme::semibold(14.5);
+        let name = theme::elide_middle(ui, &it.file_name, &name_font, text_w);
+        clip.text(pos2(left, rect.top() + 12.0), Align2::LEFT_TOP, name, name_font, p.text);
         let sub = match &it.state {
             ItemState::Running if it.joining.is_some() => {
                 format!("Putting the file together  ·  {:.0}%", it.joining.unwrap_or(0.0) * 100.0)
@@ -787,16 +961,22 @@ impl App {
             ItemState::Failed(e) => util::friendly_error(e),
         };
         let sub_color = if matches!(it.state, ItemState::Failed(_)) { p.danger } else { p.text_dim };
-        ui.painter()
-            .with_clip_rect(Rect::from_min_max(pos2(left, rect.top()), pos2(text_right, rect.bottom())))
-            .text(pos2(left, rect.top() + 33.0), Align2::LEFT_TOP, sub, FontId::proportional(12.5), sub_color);
+        let sub_font = FontId::proportional(12.5);
+        let sub = theme::elide_end(ui, &sub, &sub_font, text_w);
+        clip.text(pos2(left, rect.top() + 34.0), Align2::LEFT_TOP, sub, sub_font, sub_color);
         if matches!(it.state, ItemState::Running | ItemState::Stopped | ItemState::Queued) && it.total.is_some() {
             let bar = Rect::from_min_size(pos2(left, rect.bottom() - 13.0), vec2((text_right - left).max(40.0), 5.0));
             let c = if it.state == ItemState::Running { p.accent } else { p.text_dim.gamma_multiply(0.7) };
             let f = it.joining.or(it.progress_fraction()).unwrap_or(0.0);
             theme::progress(ui, bar, f, c);
         }
-        let resp = resp.on_hover_text(&it.request.url);
+        let resp = resp.on_hover_ui(|ui| {
+            ui.set_max_width(460.0);
+            ui.label(RichText::new(&it.file_name).font(theme::semibold(13.0)));
+            // Stream addresses can be thousands of characters long.
+            let url: String = it.request.url.split('#').next().unwrap_or_default().chars().take(240).collect();
+            ui.label(RichText::new(url).size(11.5).color(p.text_dim));
+        });
         (resp, act)
     }
 
@@ -819,28 +999,55 @@ impl App {
 
     fn progress_window(&mut self, ctx: &egui::Context, id: ItemId) -> bool {
         let Some(it) = self.manager.item(id) else { return false };
-        let mut open = true;
-        egui::Window::new(RichText::new(&it.file_name).font(theme::semibold(15.0)))
-            .id(egui::Id::new(("progress", id)))
-            .open(&mut open)
-            .collapsible(false)
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .default_width(540.0)
-            .resizable(true)
-            .show(ctx, |ui| {
+        let spec = crate::window::Spec { title: &it.file_name, size: [580.0, 470.0], min: [480.0, 420.0], resizable: true };
+        let (_, closed) = crate::window::show(ctx, ("progress", id), spec, |ui| {
+            crate::window::footer(ui, |ui| {
+                match it.state {
+                    ItemState::Running => {
+                        if theme::button(ui, Kind::Primary, icon::PAUSE, "Pause", true).clicked() {
+                            self.manager.stop(id);
+                        }
+                    }
+                    ItemState::Complete => {
+                        if theme::button(ui, Kind::Primary, icon::ARROW_SQUARE_OUT, "Open", true).clicked() {
+                            if let Some(p) = &it.final_path {
+                                util::open_file(p);
+                            }
+                        }
+                        if theme::button(ui, Kind::Ghost, icon::FOLDER_OPEN, "Show in folder", true).clicked() {
+                            if let Some(p) = &it.final_path {
+                                util::open_folder(p);
+                            }
+                        }
+                    }
+                    _ => {
+                        if theme::button(ui, Kind::Primary, icon::PLAY, "Resume", true).clicked() {
+                            self.manager.start(id);
+                        }
+                    }
+                }
+                if it.state != ItemState::Complete && theme::button(ui, Kind::Danger, icon::X, "Cancel download", true).clicked() {
+                    self.confirm_delete = Some(vec![id]);
+                }
+            });
+            crate::window::body(ui, |ui| {
                 let p = theme::palette(ui);
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
                     theme::file_tile(ui, r, &it.file_name);
                     ui.vertical(|ui| {
+                        let w = ui.available_width();
+                        ui.label(RichText::new(theme::elide_middle(ui, &it.file_name, &theme::semibold(15.0), w)).font(theme::semibold(15.0)));
                         ui.label(RichText::new(match it.total {
-                            Some(t) => format!("{} of {}", util::size(it.downloaded), util::size(t)),
+                            Some(t) => format!("{} of {}  ·  {:.0}%", util::size(it.downloaded), util::size(t), it.progress_fraction().unwrap_or(0.0) * 100.0),
                             None => util::size(it.downloaded),
-                        }).font(theme::semibold(18.0)));
-                        ui.label(RichText::new(&it.request.url).size(11.5).color(p.text_dim));
+                        }).color(p.text_dim));
                     });
                 });
+                ui.add_space(4.0);
+                let url: String = it.request.url.split('#').next().unwrap_or_default().to_string();
+                let w = ui.available_width();
+                ui.label(RichText::new(theme::elide_middle(ui, &url, &FontId::proportional(11.5), w)).size(11.5).color(p.text_dim)).on_hover_text(&url);
                 ui.add_space(10.0);
                 let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
                 theme::progress(ui, bar, it.progress_fraction().unwrap_or(0.0), if it.state == ItemState::Complete { p.success } else { p.accent });
@@ -858,56 +1065,36 @@ impl App {
                 let mut limit_on = it.request.speed_limit.is_some();
                 let mut kb = it.request.speed_limit.map_or(500, |l| l / 1024);
                 ui.horizontal(|ui| {
-                    let c1 = ui.checkbox(&mut limit_on, "Limit this download to").changed();
+                    let c1 = theme::checkbox(ui, &mut limit_on, "Limit this download to").changed();
                     let c2 = ui.add_enabled(limit_on, egui::DragValue::new(&mut kb).range(1..=1_000_000).suffix(" KB/s")).changed();
                     if c1 || c2 {
                         self.manager.set_item_speed_limit(id, limit_on.then_some(kb * 1024));
                     }
                 });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    match it.state {
-                        ItemState::Running => {
-                            if theme::button(ui, Kind::Primary, icon::PAUSE, "Pause", true).clicked() {
-                                self.manager.stop(id);
-                            }
-                        }
-                        ItemState::Complete => {
-                            if theme::button(ui, Kind::Primary, icon::ARROW_SQUARE_OUT, "Open", true).clicked() {
-                                if let Some(p) = &it.final_path {
-                                    util::open_file(p);
-                                }
-                            }
-                        }
-                        _ => {
-                            if theme::button(ui, Kind::Primary, icon::PLAY, "Resume", true).clicked() {
-                                self.manager.start(id);
-                            }
-                        }
-                    }
-                    if it.state != ItemState::Complete && theme::button(ui, Kind::Danger, icon::X, "Cancel", true).clicked() {
-                        self.confirm_delete = Some(vec![id]);
-                    }
-                });
             });
-        open
+        });
+        !closed
     }
 
     fn popups(&mut self, ctx: &egui::Context) {
         if let Some(&id) = self.completed.front() {
             let mut close = false;
             if let Some(it) = self.manager.item(id) {
-                egui::Window::new("Download complete").id(egui::Id::new(("done", id))).collapsible(false).resizable(false).anchor(Align2::RIGHT_BOTTOM, vec2(-20.0, -20.0)).show(ctx, |ui| {
+                toast(ctx, "done", |ui| {
                     let p = theme::palette(ui);
+                    if toast_header(ui, p.success, icon::CHECK_CIRCLE, "Download complete") {
+                        close = true;
+                    }
                     ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
+                        let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
                         theme::file_tile(ui, r, &it.file_name);
                         ui.vertical(|ui| {
-                            ui.label(RichText::new(&it.file_name).font(theme::semibold(14.0)));
+                            let w = ui.available_width();
+                            ui.label(RichText::new(theme::elide_middle(ui, &it.file_name, &theme::semibold(14.0), w)).font(theme::semibold(14.0)));
                             ui.label(RichText::new(format!("{}  ·  saved", util::size(it.downloaded))).size(12.0).color(p.text_dim));
                         });
                     });
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if theme::button(ui, Kind::Primary, icon::ARROW_SQUARE_OUT, "Open", true).clicked() {
                             if let Some(p) = &it.final_path {
@@ -915,19 +1102,16 @@ impl App {
                             }
                             close = true;
                         }
-                        if theme::button(ui, Kind::Ghost, icon::FOLDER_OPEN, "Folder", true).clicked() {
+                        if theme::button(ui, Kind::Ghost, icon::FOLDER_OPEN, "Show in folder", true).clicked() {
                             if let Some(p) = &it.final_path {
                                 util::open_folder(p);
                             }
                             close = true;
                         }
-                        if theme::button(ui, Kind::Ghost, icon::X, "", true).clicked() {
-                            close = true;
-                        }
                     });
                     let mut s = self.manager.settings();
                     let mut dont = !s.show_complete_dialog;
-                    if ui.checkbox(&mut dont, "Don't show again").changed() {
+                    if theme::checkbox(ui, &mut dont, "Don't show this again").changed() {
                         s.show_complete_dialog = !dont;
                         self.manager.set_settings(s);
                     }
@@ -974,9 +1158,18 @@ impl App {
 
         if let Some(m) = self.media.front() {
             let mut take: Option<bool> = None;
-            egui::Window::new("Media found").collapsible(false).anchor(Align2::RIGHT_BOTTOM, vec2(-20.0, -20.0)).show(ctx, |ui| {
-                ui.label(RichText::new(m.title.clone().unwrap_or_else(|| "Media on this page".into())).font(theme::semibold(14.0)));
-                ui.label(RichText::new(format!("{} · {}", m.kind, host(&m.request.url))).size(12.0).color(theme::palette(ui).text_dim));
+            // Shown above the "Download complete" card when both are up.
+            let lift = if self.completed.is_empty() { 0.0 } else { 190.0 };
+            toast_at(ctx, "media", lift, |ui| {
+                let p = theme::palette(ui);
+                if toast_header(ui, p.accent, icon::FILM_STRIP, "Media found") {
+                    take = Some(false);
+                }
+                let w = ui.available_width();
+                let title = m.title.clone().unwrap_or_else(|| "Media on this page".into());
+                ui.label(RichText::new(theme::elide_end(ui, &title, &theme::semibold(14.0), w)).font(theme::semibold(14.0)));
+                ui.label(RichText::new(format!("{} · {}", m.kind, host(&m.request.url))).size(12.0).color(p.text_dim));
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if theme::button(ui, Kind::Primary, icon::DOWNLOAD_SIMPLE, "Download", true).clicked() {
                         take = Some(true);
@@ -1021,6 +1214,45 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
+}
+
+/// Notification card in the bottom-right corner of the main window.
+fn toast<R>(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    toast_at(ctx, id, 0.0, add)
+}
+
+fn toast_at<R>(ctx: &egui::Context, id: &str, lift: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Area::new(egui::Id::new(("toast", id)))
+        .anchor(Align2::RIGHT_BOTTOM, vec2(-20.0, -40.0 - lift))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let p = theme::palette(ui);
+            egui::Frame::new()
+                .fill(p.surface)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(16))
+                .shadow(ui.visuals().window_shadow)
+                .show(ui, |ui| {
+                    ui.set_width(340.0);
+                    add(ui)
+                })
+                .inner
+        })
+        .inner
+}
+
+/// Coloured icon, title and a close button. Returns true when closed.
+fn toast_header(ui: &mut egui::Ui, color: Color32, ic: &str, title: &str) -> bool {
+    let mut closed = false;
+    ui.horizontal(|ui| {
+        ui.label(theme::ic(ic).size(17.0).color(color));
+        ui.label(RichText::new(title).font(theme::semibold(13.5)).color(color));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            closed = theme::icon_button(ui, icon::X, "Close").clicked();
+        });
+    });
+    closed
 }
 
 fn host(url: &str) -> String {
@@ -1081,6 +1313,8 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
+        let auto = self.manager.settings().check_updates;
+        self.updater.tick(&self.rt, auto);
         // Keep polling while hidden so tray and browser requests are handled.
         ctx.request_repaint_after(Duration::from_millis(500));
     }
@@ -1092,11 +1326,13 @@ impl eframe::App for App {
         let all = self.manager.items();
         let visible = self.visible_items(&all);
 
+        // A narrow window gets the icon-strip sidebar so the list keeps its room.
+        let compact = ui.available_width() < 900.0;
         egui::Panel::left("sidebar")
             .resizable(false)
-            .exact_size(236.0)
-            .frame(egui::Frame::new().fill(p.sidebar).inner_margin(Margin::symmetric(10, 0)))
-            .show(ui, |ui| self.sidebar(ui, &all));
+            .exact_size(if compact { 72.0 } else { 236.0 })
+            .frame(egui::Frame::new().fill(p.sidebar).inner_margin(Margin::symmetric(if compact { 8 } else { 10 }, 0)))
+            .show(ui, |ui| if compact { self.sidebar_compact(ui, &all) } else { self.sidebar(ui, &all) });
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(14, 6)))
             .show(ui, |ui| self.status_bar(ui));
@@ -1106,6 +1342,7 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin { left: 22, right: 22, top: 12, bottom: 4 }))
             .show(ui, |ui| {
+                self.update_banner(ui);
                 self.extension_banner(ui);
                 self.list(ui, &visible)
             });
@@ -1126,6 +1363,13 @@ impl eframe::App for App {
 
 /// The app icon (vector), rendered at exactly the pixel size the display needs.
 const LOGO_SVG: &[u8] = include_bytes!("../assets/rdm_icon.svg");
+
+/// The simple icon (for small sizes). Its tile spans 72..1182 of the 1254-unit canvas; the
+/// rest is the shadow, cropped away when it is drawn small.
+const SIMPLE_ICON_SVG: &[u8] = include_bytes!("../assets/rdm_icon_simple.svg");
+const SIMPLE_ICON_FULL: f32 = 1254.0;
+const SIMPLE_ICON_CROP: f32 = 72.0;
+const SIMPLE_ICON_TILE: f32 = 1110.0;
 
 /// Pixel size for the sidebar icon at the current display scale.
 fn logo_pixels(want: f32) -> u32 {

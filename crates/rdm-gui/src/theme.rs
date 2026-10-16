@@ -139,7 +139,8 @@ fn style_for(p: Palette, dark: bool) -> egui::Style {
     w.noninteractive.corner_radius = r;
     w.inactive.bg_fill = p.surface_hi;
     w.inactive.weak_bg_fill = p.surface_hi;
-    w.inactive.bg_stroke = Stroke::NONE;
+    // A hairline outline keeps text fields, drop-downs and number boxes visible on cards.
+    w.inactive.bg_stroke = Stroke::new(1.0, p.border);
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
     w.inactive.corner_radius = r;
     w.hovered.bg_fill = p.border;
@@ -337,6 +338,209 @@ pub fn file_tile(ui: &mut Ui, rect: Rect, name: &str) {
 pub fn card(ui: &Ui) -> egui::Frame {
     let p = palette(ui);
     egui::Frame::new().fill(p.surface).corner_radius(CornerRadius::same(12)).stroke(Stroke::new(1.0, p.border)).inner_margin(Margin::same(14))
+}
+
+// ------------------------------------------------------------------ text fitting
+
+/// Shorten `text` to fit `max_w` by cutting out the middle ("long-name…tail.zip"), so the
+/// start and the file extension stay visible.
+pub fn elide_middle(ui: &Ui, text: &str, font: &FontId, max_w: f32) -> String {
+    let width = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x;
+    if width(text) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let ext = text.rsplit_once('.').map_or(0, |(_, e)| if e.chars().count() <= 6 { e.chars().count() + 1 } else { 0 });
+    let fit = |k: usize| -> String {
+        let tail = (k * 2 / 5).max(ext.min(k)).min(k);
+        let head = k - tail;
+        let mut s: String = chars[..head].iter().collect();
+        s.push('…');
+        s.extend(&chars[chars.len() - tail..]);
+        s
+    };
+    // Largest number of kept characters that still fits.
+    let (mut lo, mut hi) = (0usize, chars.len().saturating_sub(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&fit(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    fit(lo)
+}
+
+/// Shorten `text` to fit `max_w` by cutting the end ("Some long descript…").
+pub fn elide_end(ui: &Ui, text: &str, font: &FontId, max_w: f32) -> String {
+    let width = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x;
+    if width(text) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let fit = |k: usize| chars[..k].iter().collect::<String>().trim_end().to_string() + "…";
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&fit(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    fit(lo)
+}
+
+// ------------------------------------------------------------------ form controls
+
+/// Checkbox with a clear rounded box (filled accent with a tick when on).
+pub fn checkbox(ui: &mut Ui, on: &mut bool, label: impl Into<String>) -> Response {
+    let p = palette(ui);
+    let label = label.into();
+    let enabled = ui.is_enabled();
+    let galley = ui.painter().layout(label, FontId::proportional(14.0), p.text, (ui.available_width() - 30.0).max(40.0));
+    let size = vec2(26.0 + galley.size().x, galley.size().y.max(20.0) + 4.0);
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        // Centred on the first line of the label.
+        let line_h = galley.size().y / galley.rows.len().max(1) as f32;
+        let b = Rect::from_center_size(pos2(rect.left() + 9.0, rect.top() + 2.0 + line_h / 2.0), vec2(18.0, 18.0));
+        let hovered = resp.hovered() && enabled;
+        if *on {
+            ui.painter().rect_filled(b, CornerRadius::same(5), if hovered { lighten(p.accent, 0.1) } else { p.accent });
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, icon::CHECK, icon_font(12.5), Color32::WHITE);
+        } else {
+            let fill = ui.visuals().extreme_bg_color;
+            ui.painter().rect(b, CornerRadius::same(5), fill, Stroke::new(1.5, if hovered { p.accent } else { p.text_dim.gamma_multiply(0.7) }), egui::StrokeKind::Inside);
+        }
+        let color = if enabled { p.text } else { p.text_dim.gamma_multiply(0.7) };
+        ui.painter().galley(pos2(rect.left() + 26.0, rect.top() + 2.0), galley, color);
+    }
+    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+}
+
+/// iOS-style on/off switch.
+pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+    let p = palette(ui);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(40.0, 22.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool_responsive(resp.id, *on);
+        let track = if ui.is_enabled() { lerp_color(p.track, p.accent, t) } else { p.track };
+        ui.painter().rect_filled(rect, CornerRadius::same(11), track);
+        let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
+        ui.painter().circle_filled(pos2(x, rect.center().y), 8.0, if ui.is_enabled() { Color32::WHITE } else { p.text_dim });
+    }
+    if ui.is_enabled() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+}
+
+/// A settings line: title (and optional hint) on the left, the control on the right.
+pub fn setting(ui: &mut Ui, title: &str, hint: &str, control: impl FnOnce(&mut Ui)) {
+    let p = palette(ui);
+    ui.horizontal(|ui| {
+        let right_w = 220.0f32.min(ui.available_width() * 0.45);
+        let left_w = ui.available_width() - right_w - 12.0;
+        ui.vertical(|ui| {
+            ui.set_width(left_w);
+            ui.add(egui::Label::new(egui::RichText::new(title).color(p.text)).wrap());
+            if !hint.is_empty() {
+                ui.add(egui::Label::new(egui::RichText::new(hint).size(12.0).color(p.text_dim)).wrap());
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+    });
+}
+
+/// A settings line with an on/off switch. Returns true when it was flipped.
+pub fn switch_setting(ui: &mut Ui, title: &str, hint: &str, on: &mut bool) -> bool {
+    let mut changed = false;
+    setting(ui, title, hint, |ui| changed = toggle(ui, on).changed());
+    changed
+}
+
+/// Heading of a settings page.
+pub fn page_title(ui: &mut Ui, title: &str, subtitle: &str) {
+    let p = palette(ui);
+    ui.label(egui::RichText::new(title).font(semibold(19.0)));
+    if !subtitle.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(subtitle).color(p.text_dim)).wrap());
+    }
+    ui.add_space(12.0);
+}
+
+/// A titled card grouping related settings; rows inside are separated by thin lines.
+pub fn group<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let p = palette(ui);
+    if !title.is_empty() {
+        ui.label(egui::RichText::new(title.to_uppercase()).font(semibold(11.0)).color(p.text_dim));
+        ui.add_space(2.0);
+    }
+    let r = card(ui).inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 10.0;
+        add(ui)
+    });
+    ui.add_space(16.0);
+    r.inner
+}
+
+/// Thin line between rows of a group.
+pub fn divider(ui: &mut Ui) {
+    let p = palette(ui);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(r.x_range(), r.center().y, Stroke::new(1.0, p.border.gamma_multiply(0.7)));
+}
+
+/// Hint text under a control.
+pub fn hint(ui: &mut Ui, text: &str) {
+    let p = palette(ui);
+    ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(p.text_dim)).wrap());
+}
+
+/// Vertical navigation entry for a dialog (Options sections, scheduler queues).
+pub fn side_tab(ui: &mut Ui, icon_str: &str, label: &str, selected: bool) -> Response {
+    nav_item(ui, icon_str, label, None, selected)
+}
+
+/// Icon-only sidebar entry (narrow window): the count shows as a small badge and the name
+/// on hover.
+pub fn nav_icon(ui: &mut Ui, icon_str: &str, label: &str, count: Option<usize>, selected: bool) -> Response {
+    let p = palette(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let cell = Rect::from_center_size(rect.center(), vec2(40.0, 36.0));
+        let bg = if selected { p.accent_soft } else if resp.hovered() { p.surface_hi } else { Color32::TRANSPARENT };
+        ui.painter().rect_filled(cell, CornerRadius::same(10), bg);
+        ui.painter().text(cell.center(), Align2::CENTER_CENTER, icon_str, icon_font(19.0), if selected { p.accent } else { p.text_dim });
+        if let Some(n) = count.filter(|n| *n > 0) {
+            let t = if n > 99 { "99+".to_string() } else { n.to_string() };
+            let g = ui.painter().layout_no_wrap(t.clone(), semibold(9.5), Color32::WHITE);
+            let bw = (g.size().x + 8.0).max(16.0);
+            let br = Rect::from_center_size(pos2(cell.right() - 4.0, cell.top() + 5.0), vec2(bw, 16.0));
+            ui.painter().rect_filled(br, CornerRadius::same(8), if selected { p.accent } else { p.border });
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, t, semibold(9.5), if selected { Color32::WHITE } else { p.text });
+        }
+    }
+    resp.on_hover_text(label).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Round accent button with just an icon (narrow sidebar "New download").
+pub fn round_cta(ui: &mut Ui, icon_str: &str, tooltip: &str) -> Response {
+    let p = palette(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    let r = Rect::from_center_size(rect.center(), vec2(42.0, 42.0));
+    if ui.is_rect_visible(rect) {
+        let fill = if resp.is_pointer_button_down_on() { p.accent.gamma_multiply(0.85) } else if resp.hovered() { lighten(p.accent, 0.1) } else { p.accent };
+        ui.painter().add(egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: p.accent.gamma_multiply(0.35) }.as_shape(r, CornerRadius::same(13)));
+        ui.painter().rect_filled(r, CornerRadius::same(13), fill);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, icon_str, icon_font(20.0), Color32::WHITE);
+    }
+    resp.on_hover_text(tooltip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
 fn lighten(c: Color32, f: f32) -> Color32 {

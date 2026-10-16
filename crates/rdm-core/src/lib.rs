@@ -17,6 +17,7 @@ pub mod naming;
 pub mod pair;
 pub mod settings;
 pub mod storage;
+pub mod update;
 pub mod youtube;
 pub mod ytsolve;
 

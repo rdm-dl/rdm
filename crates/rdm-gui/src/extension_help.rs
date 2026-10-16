@@ -4,6 +4,7 @@
 
 use crate::app::App;
 use crate::theme::{self, Kind, icon};
+use crate::window::{self, Spec};
 use eframe::egui::{self, RichText};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -138,39 +139,54 @@ fn step(ui: &mut egui::Ui, n: usize, title: &str, body: impl FnOnce(&mut egui::U
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(h) = app.ext_help.as_mut() else { return };
-    let mut open = true;
     let connected_once = app.manager.settings().extension_connected_once;
     ctx.request_repaint_after(Duration::from_secs(1));
-    egui::Window::new("Install the browser extension")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .default_width(620.0)
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(ctx.content_rect().center())
-        .show(ctx, |ui| {
+    let mut done = false;
+    let spec = Spec { title: "Install the browser extension", size: [700.0, 700.0], min: [580.0, 520.0], resizable: true };
+    let (_, closed) = window::show(ctx, "ext-help", spec, |ui| {
+        window::footer(ui, |ui| {
+            if theme::button(ui, Kind::Primary, icon::CHECK, "Done", true).clicked() {
+                done = true;
+            }
+            if let Some(m) = &h.message {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let p = theme::palette(ui);
+                    ui.label(theme::ic(icon::INFO).color(p.accent));
+                    ui.add(egui::Label::new(RichText::new(m).size(12.5)).wrap());
+                });
+            }
+        });
+        window::body(ui, |ui| {
             let p = theme::palette(ui);
             // Live status.
             let recent = rdm_core::ipc::last_extension_contact().map(|t| chrono::Utc::now().timestamp() - t);
-            let (text, color) = match recent {
-                Some(s) if s < 600 => ("✓  Extension connected — downloads and videos from your browser go to RDM.".to_string(), p.success),
-                _ if connected_once => ("The extension is installed but hasn't checked in yet. Open your browser and it will connect.".to_string(), p.text_dim),
-                _ => ("Not connected yet. Follow the steps for your browser.".to_string(), p.warning),
+            let (ic, text, color) = match recent {
+                Some(s) if s < 600 => (icon::CHECK_CIRCLE, "Extension connected — downloads and videos from your browser go to RDM.", p.success),
+                _ if connected_once => (icon::INFO, "The extension is installed but hasn't checked in yet. Open your browser and it will connect.", p.text_dim),
+                _ => (icon::WARNING_CIRCLE, "Not connected yet. Follow the steps for your browser.", p.warning),
             };
-            ui.label(RichText::new(text).color(color));
-            ui.add_space(8.0);
+            egui::Frame::new().fill(color.gamma_multiply(0.12)).corner_radius(egui::CornerRadius::same(10)).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(theme::ic(ic).size(18.0).color(color));
+                    ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+                });
+            });
+            ui.add_space(14.0);
 
-            // Browser tabs.
+            // Browser choice.
+            ui.label(RichText::new("YOUR BROWSER").font(theme::semibold(11.0)).color(p.text_dim));
+            ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 for (i, b) in h.browsers.iter().enumerate() {
-                    let label = if b.exe.is_some() { b.name.to_string() } else { format!("{} (not found)", b.name) };
-                    if ui.selectable_label(h.selected == i, label).clicked() {
+                    let label = if b.exe.is_some() { b.name.to_string() } else { format!("{} (not installed)", b.name) };
+                    if ui.selectable_label(h.selected == i, RichText::new(label).font(theme::semibold(13.0))).clicked() {
                         h.selected = i;
                         h.message = None;
                     }
                 }
             });
-            ui.separator();
+            ui.add_space(14.0);
             let Some(b) = h.browsers.get(h.selected).cloned() else { return };
 
             step(ui, 1, "Connect RDM to your browsers", |ui| {
@@ -246,12 +262,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     });
                 }
             }
-            if let Some(m) = &h.message {
-                ui.separator();
-                ui.label(m);
-            }
         });
-    if !open {
+    });
+    if done || closed {
         app.ext_help = None;
     }
 }

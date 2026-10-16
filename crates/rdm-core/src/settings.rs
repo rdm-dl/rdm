@@ -206,6 +206,8 @@ pub struct Settings {
     pub virus_scan_command: Option<String>,
     pub language: String,
     pub dark_mode: bool,
+    /// Look for a new version of RDM now and then.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -231,6 +233,7 @@ impl Default for Settings {
             virus_scan_command: None,
             language: "en".into(),
             dark_mode: true,
+            check_updates: true,
         }
     }
 }

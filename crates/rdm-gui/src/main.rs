@@ -8,7 +8,9 @@ mod extension_help;
 mod grabber_ui;
 mod theme;
 mod tray;
+mod updater;
 mod util;
+mod window;
 
 use eframe::egui;
 use rdm_core::ipc::{self, Client, Request};
@@ -38,6 +40,23 @@ fn main() -> eframe::Result<()> {
     let dir = data_dir();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+
+    // Started by an update: the previous version is still closing; wait until it lets go.
+    if args.iter().any(|a| a == "--after-update") {
+        for _ in 0..150 {
+            let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("app.lock"));
+            if lock.is_ok_and(|f| f.try_lock().is_ok()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    // Files an earlier update set aside (not in a development build folder).
+    if let Some(app_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(std::path::Path::to_path_buf)) {
+        if !app_dir.components().any(|c| c.as_os_str() == "target") {
+            rdm_core::update::remove_leftovers(&app_dir);
+        }
+    }
 
     // Single instance: hand the URLs to the running app and quit. The lock file closes the
     // window where several launches (e.g. parallel browser requests) start at once.
@@ -100,13 +119,11 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("RDM — Download Manager")
+            .with_title(window::MAIN_TITLE)
             .with_inner_size([1100.0, 640.0])
-            .with_min_inner_size([720.0, 400.0])
+            .with_min_inner_size([640.0, 420.0])
             .with_visible(!minimized)
-            .with_icon(Arc::new(
-                eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon256.png")).unwrap_or_default(),
-            )),
+            .with_icon(window::app_icon()),
         ..Default::default()
     };
     let handle = rt.handle().clone();
@@ -122,5 +139,8 @@ fn main() -> eframe::Result<()> {
     );
     rt.block_on(manager.shutdown());
     let _ = std::fs::remove_file(dir.join("ipc.json"));
+    // After an update: let go of the single-instance lock, then start the new version.
+    drop(instance_lock);
+    updater::start_new_version_if_requested();
     result
 }
