@@ -7,3 +7,6 @@
 /rdm_icon.png
 /rdm_logo.png
 /RDM_Download_Manager_*.svg
+
+# Personal files that end up in the project root
+/*.csv
