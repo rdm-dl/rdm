@@ -6,6 +6,7 @@ use crate::limiter::Limiter;
 use crate::naming;
 use crate::storage::TempDir;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +27,8 @@ pub struct SegRef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub kind: String,
+    /// The `Representation` id, which a stream keeps from period to period.
+    pub id: String,
     pub bandwidth: u64,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -130,21 +133,56 @@ fn base_url(n: roxmltree::Node, parent: &Url) -> Url {
     child(n, "BaseURL").and_then(|b| b.text()).and_then(|t| parent.join(t.trim()).ok()).unwrap_or_else(|| parent.clone())
 }
 
-/// Parse an MPD (static / VOD) into tracks.
+/// One `Period`: a stretch of the programme, or an ad break.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Period {
+    pub tracks: Vec<Track>,
+    /// In seconds.
+    pub length: f64,
+}
+
+/// Parse an MPD (static / VOD) into the longest period's tracks.
+#[cfg(test)]
 pub fn parse_mpd(xml: &str, mpd_url: &Url) -> Result<Vec<Track>> {
+    let (mut periods, main) = parse_periods(xml, mpd_url)?;
+    Ok(periods.swap_remove(main).tracks)
+}
+
+/// Parse an MPD (static / VOD) into its periods, and say which is the longest.
+pub fn parse_periods(xml: &str, mpd_url: &Url) -> Result<(Vec<Period>, usize)> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| DownloadError::Other(format!("bad MPD: {e}")))?;
     let mpd = doc.root_element();
     if mpd.attribute("type") == Some("dynamic") {
         return Err(DownloadError::Other("live DASH streams are not supported yet".into()));
     }
+    if doc.descendants().any(|n| n.is_element() && n.tag_name().name() == "ContentProtection") {
+        return Err(DownloadError::Other(crate::hls::DRM.into()));
+    }
     let total_dur = mpd.attribute("mediaPresentationDuration").and_then(parse_duration).unwrap_or(0.0);
     let mpd_base = base_url(mpd, mpd_url);
-    let mut tracks = vec![];
-    let Some(period) = child(mpd, "Period") else {
-        return Err(DownloadError::Other("MPD has no Period".into()));
+    // Ad breaks are periods of their own and often come first: the longest one is the programme.
+    let periods: Vec<_> = mpd.children().filter(|c| c.is_element() && c.tag_name().name() == "Period").collect();
+    let length = |i: usize| {
+        periods[i].attribute("duration").and_then(parse_duration).unwrap_or_else(|| {
+            let start = periods[i].attribute("start").and_then(parse_duration).unwrap_or(0.0);
+            let end = periods.get(i + 1).and_then(|p| p.attribute("start")).and_then(parse_duration).unwrap_or(total_dur);
+            (end - start).max(0.0)
+        })
     };
-    let period_dur = period.attribute("duration").and_then(parse_duration).unwrap_or(total_dur);
-    let period_base = base_url(period, &mpd_base);
+    if periods.is_empty() {
+        return Err(DownloadError::Other("MPD has no Period".into()));
+    }
+    let out: Vec<Period> = periods.iter().enumerate().map(|(i, p)| Period { tracks: period_tracks(*p, &mpd_base, length(i)), length: length(i) }).collect();
+    // A period can be only a link to one kept elsewhere, usually an ad: it has no tracks here.
+    let main = (0..out.len()).rev().filter(|i| !out[*i].tracks.is_empty()).max_by(|a, b| out[*a].length.total_cmp(&out[*b].length));
+    let main = main.ok_or_else(|| DownloadError::Other("no playable tracks in MPD".into()))?;
+    Ok((out, main))
+}
+
+/// The tracks of one period.
+fn period_tracks(period: roxmltree::Node, mpd_base: &Url, period_dur: f64) -> Vec<Track> {
+    let mut tracks = vec![];
+    let period_base = base_url(period, mpd_base);
     for aset in period.children().filter(|c| c.tag_name().name() == "AdaptationSet") {
         let aset_base = base_url(aset, &period_base);
         let aset_tmpl = child(aset, "SegmentTemplate");
@@ -217,6 +255,7 @@ pub fn parse_mpd(xml: &str, mpd_url: &Url) -> Result<Vec<Track>> {
             }
             tracks.push(Track {
                 kind: kind.into(),
+                id: rep_id.to_string(),
                 bandwidth,
                 width: rep.attribute("width").and_then(|v| v.parse().ok()),
                 height: rep.attribute("height").and_then(|v| v.parse().ok()),
@@ -226,10 +265,136 @@ pub fn parse_mpd(xml: &str, mpd_url: &Url) -> Result<Vec<Track>> {
             });
         }
     }
-    if tracks.is_empty() {
-        return Err(DownloadError::Other("no playable tracks in MPD".into()));
+    tracks
+}
+
+/// Whether two segments come from the same place. An ad break is served from somewhere else,
+/// even when it's on the same servers.
+fn same_place(a: &SegRef, b: &SegRef) -> bool {
+    a.url.host_str() == b.url.host_str() && a.url.path_segments().and_then(|mut s| s.next()) == b.url.path_segments().and_then(|mut s| s.next())
+}
+
+/// The track of another period that carries on from `track`.
+fn counterpart<'a>(track: &Track, others: &'a [Track]) -> Option<&'a Track> {
+    let same_kind = || others.iter().filter(|o| o.kind == track.kind);
+    let closest = || same_kind().min_by_key(|o| (o.height != track.height, o.bandwidth.abs_diff(track.bandwidth)));
+    same_kind().find(|o| o.id == track.id).or_else(closest)
+}
+
+/// What it takes to put several periods together.
+#[derive(Debug, Clone, PartialEq)]
+struct Joined {
+    /// Where each period starts in the finished video, in seconds.
+    starts: Vec<f64>,
+    /// For each track: the segment each period starts at.
+    marks: Vec<Vec<usize>>,
+}
+
+/// The periods that go together with `main`: the same stream carried on. One served from
+/// elsewhere is an ad break, and one with a different header can't share a file.
+async fn join_periods(client: &Client, req: &DownloadRequest, periods: &[Period], main: usize, chosen: &[(&'static str, Track)], keep_ads: bool) -> Option<(Vec<(&'static str, Track)>, Joined)> {
+    if periods.len() < 2 {
+        return None;
     }
-    Ok(tracks)
+    let mut known: HashMap<Url, Option<Vec<u8>>> = HashMap::new();
+    let mut identity = async |init: &SegRef| {
+        if let Some(found) = known.get(&init.url) {
+            return found.clone();
+        }
+        let bytes = fetch(client, init, req).await.ok();
+        let found = bytes.and_then(|b| crate::mux::mp4::stream_identity(&b));
+        known.insert(init.url.clone(), found.clone());
+        found
+    };
+    let mut wanted = vec![];
+    for (_, track) in chosen {
+        wanted.push(identity(track.init.as_ref()?).await?);
+    }
+    let mut kept = vec![];
+    'periods: for (index, period) in periods.iter().enumerate() {
+        if index == main {
+            kept.push(index);
+            continue;
+        }
+        for ((_, track), want) in chosen.iter().zip(&wanted) {
+            let Some(other) = counterpart(track, &period.tracks) else { continue 'periods };
+            let (Some(init), Some(first), Some(ours)) = (&other.init, other.segments.first(), track.segments.first()) else { continue 'periods };
+            if (!keep_ads && !same_place(first, ours)) || identity(init).await.as_ref() != Some(want) {
+                continue 'periods;
+            }
+        }
+        kept.push(index);
+    }
+    if kept.len() < 2 {
+        return None;
+    }
+    let mut starts = vec![];
+    let mut at = 0.0;
+    for index in &kept {
+        starts.push(at);
+        at += periods[*index].length;
+    }
+    let mut joined = vec![];
+    let mut marks = vec![];
+    for (kind, track) in chosen {
+        let mut whole = track.clone();
+        whole.segments.clear();
+        let mut starts_at = vec![];
+        for index in &kept {
+            let part = if *index == main { track } else { counterpart(track, &periods[*index].tracks)? };
+            starts_at.push(whole.segments.len());
+            whole.segments.extend(part.segments.iter().cloned());
+        }
+        marks.push(starts_at);
+        joined.push((*kind, whole));
+    }
+    Some((joined, Joined { starts, marks }))
+}
+
+/// Periods keep their own clocks, and ones left out leave holes: put each on the finished video's
+/// clock. The tracks of a period keep their distance from each other, which is the sync. A track
+/// can start before its period does, because segments rarely end exactly there: so a period
+/// begins where the last of its tracks begins, and what's before that overlaps the part before.
+/// Only the first period has nothing to overlap.
+fn line_up(files: &[PathBuf], places: &[Vec<u64>], starts: &[f64]) -> std::io::Result<()> {
+    let opening: Vec<Vec<Option<f64>>> = files.iter().zip(places).map(|(f, at)| crate::mux::mp4::first_times(f, at)).collect::<std::io::Result<_>>()?;
+    let first = |p: usize| opening.iter().filter_map(move |o| o[p]);
+    let origin: Vec<f64> = (0..starts.len()).map(|p| if p == 0 { first(p).fold(f64::INFINITY, f64::min) } else { first(p).fold(f64::NEG_INFINITY, f64::max) }).collect();
+    for (file, at) in files.iter().zip(places) {
+        let moves: Vec<f64> = starts.iter().zip(&origin).map(|(start, first)| if first.is_finite() { start - first } else { 0.0 }).collect();
+        crate::mux::mp4::move_times(file, at, &moves)?;
+    }
+    Ok(())
+}
+
+/// Subtitle tracks that are one whole file. Ones cut into pieces come in forms RDM can't read.
+pub fn text_tracks(xml: &str, mpd_url: &Url) -> Vec<crate::subtitles::Track> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else { return vec![] };
+    let mpd = doc.root_element();
+    let mpd_base = base_url(mpd, mpd_url);
+    let mut out = vec![];
+    for period in mpd.children().filter(|c| c.tag_name().name() == "Period") {
+        let period_base = base_url(period, &mpd_base);
+        for aset in period.children().filter(|c| c.tag_name().name() == "AdaptationSet") {
+            let aset_base = base_url(aset, &period_base);
+            if child(aset, "SegmentTemplate").is_some() {
+                continue;
+            }
+            for rep in aset.children().filter(|c| c.tag_name().name() == "Representation") {
+                let mime = rep.attribute("mimeType").or(aset.attribute("mimeType")).unwrap_or("");
+                let ext = match mime {
+                    "text/vtt" => "vtt",
+                    "application/ttml+xml" => "ttml",
+                    _ => continue,
+                };
+                if child(rep, "BaseURL").is_none() && child(aset, "BaseURL").is_none() {
+                    continue;
+                }
+                out.push(crate::subtitles::Track { url: base_url(rep, &aset_base), language: aset.attribute("lang").map(str::to_string), ext, pieces: false });
+            }
+        }
+    }
+    out
 }
 
 /// Highest-bandwidth video and audio tracks.
@@ -267,18 +432,24 @@ async fn fetch(client: &Client, s: &SegRef, req: &DownloadRequest) -> Result<Vec
 pub async fn run(
     req: &DownloadRequest,
     client: Client,
-    connections: usize,
+    cfg: &crate::config::EngineConfig,
     tmp: TempDir,
     limiter: Arc<Limiter>,
     global_limiter: Arc<Limiter>,
     progress: &watch::Sender<Progress>,
     control: &mut watch::Receiver<Control>,
 ) -> Result<Option<PathBuf>> {
+    let connections = cfg.max_connections;
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(e.to_string()))?;
     let xml = String::from_utf8_lossy(&fetch(&client, &SegRef { url: url.clone(), range: None }, req).await?).into_owned();
-    let tracks = parse_mpd(&xml, &url)?;
-    let (video, audio) = pick(&tracks, crate::hls::quality_hint(&url));
-    let chosen: Vec<(&str, &Track)> = [("video", video), ("audio", audio)].into_iter().filter_map(|(n, t)| t.map(|t| (n, t))).collect();
+    let (periods, main) = parse_periods(&xml, &url)?;
+    let (video, audio) = pick(&periods[main].tracks, crate::hls::quality_hint(&url));
+    let chosen: Vec<(&'static str, Track)> = [("video", video), ("audio", audio)].into_iter().filter_map(|(n, t)| t.map(|t| (n, t.clone()))).collect();
+    // A show cut up by ad breaks is several periods: the parts go back together.
+    let (chosen, joined) = match join_periods(&client, req, &periods, main, &chosen, cfg.keep_ads).await {
+        Some((whole, joined)) => (whole, Some(joined)),
+        None => (chosen, None),
+    };
 
     let stem = req
         .file_name
@@ -287,6 +458,7 @@ pub async fn run(
         .map(|n| naming::sanitize(&n))
         .map(|n| n.rsplit_once('.').map_or(n.clone(), |(s, e)| if ["mpd", "mp4", "mkv", "webm"].contains(&e.to_ascii_lowercase().as_str()) { s.to_string() } else { n.clone() }))
         .unwrap_or_else(|| "stream".into());
+    let stem = naming::stream_stem(stem, &url);
     let file_name = format!("{stem}.mp4");
     progress.send_modify(|p| {
         p.status = Status::Downloading;
@@ -400,7 +572,19 @@ pub async fn run(
         tracks.push((parts, out.clone()));
         track_files.push((kind.to_string(), out));
     }
+    // Where each period starts in each joined file, in bytes.
+    let places: Option<Vec<Vec<u64>>> = joined.as_ref().map(|j| {
+        let size = |p: PathBuf| std::fs::metadata(p).map_or(0, |m| m.len());
+        chosen.iter().enumerate().map(|(ti, (_, t))| {
+            let header = if t.init.is_some() { size(path_of(ti, usize::MAX)) } else { 0 };
+            j.marks[ti].iter().map(|m| header + (0..*m).map(|si| size(path_of(ti, si))).sum::<u64>()).collect()
+        }).collect()
+    });
     crate::join::concat(tracks, progress).await?;
+    if let (Some(joined), Some(places)) = (&joined, places) {
+        let (files, starts): (Vec<PathBuf>, Vec<f64>) = (track_files.iter().map(|(_, f): &(String, PathBuf)| f.clone()).collect(), joined.starts.clone());
+        tokio::task::spawn_blocking(move || line_up(&files, &places, &starts)).await.map_err(|e| DownloadError::Other(e.to_string()))??;
+    }
     std::fs::create_dir_all(&req.dir)?;
     let dest = naming::unique_path(&req.dir, &file_name);
     let result = if track_files.len() == 1 {
@@ -411,6 +595,11 @@ pub async fn run(
         let audio = track_files.iter().find(|(k, _)| k == "audio").map(|(_, f)| f.clone()).unwrap_or_else(|| track_files[1].1.clone());
         crate::join::video_and_audio(video, audio, dest, &stem, progress).await?
     };
+    let name = stem.clone();
+    let result = crate::join::finish(result, name, progress).await?;
+    if cfg.save_subtitles {
+        crate::subtitles::save(&client, &req, text_tracks(&xml, &url), &cfg.subtitle_languages, &result).await;
+    }
     let size = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
     progress.send_modify(|p| {
         p.total = Some(size);
@@ -432,6 +621,40 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn track(id: &str, bandwidth: u64, height: Option<u32>) -> Track {
+        let url = Url::parse("https://x/a.mp4").unwrap();
+        Track { kind: "video".into(), id: id.into(), bandwidth, width: None, height, codecs: None, init: None, segments: vec![SegRef { url, range: None }] }
+    }
+
+    #[test]
+    fn a_stream_is_followed_from_period_to_period() {
+        let others = [track("720", 3000, Some(720)), track("480", 1000, Some(480))];
+        assert_eq!(counterpart(&track("480", 1200, Some(480)), &others).unwrap().id, "480");
+        // The name changed, the picture size didn't.
+        assert_eq!(counterpart(&track("v2", 1200, Some(480)), &others).unwrap().id, "480");
+    }
+
+    #[test]
+    fn an_ad_is_served_from_elsewhere() {
+        let at = |u: &str| SegRef { url: Url::parse(u).unwrap(), range: None };
+        assert!(same_place(&at("https://x/show/v/1.m4s"), &at("https://x/show/v/9.m4s")));
+        assert!(!same_place(&at("https://x/show/v/1.m4s"), &at("https://x/ads/v/1.m4s")));
+        assert!(!same_place(&at("https://x/show/1.m4s"), &at("https://y/show/1.m4s")));
+    }
+
+    #[test]
+    fn whole_subtitle_files_are_found() {
+        let xml = r#"<MPD><BaseURL>https://x/a/</BaseURL><Period>
+          <AdaptationSet mimeType="text/vtt" lang="en"><Representation id="s"><BaseURL>en.vtt</BaseURL></Representation></AdaptationSet>
+          <AdaptationSet contentType="text" lang="fr"><Representation id="t" mimeType="application/ttml+xml"><BaseURL>fr.ttml</BaseURL></Representation></AdaptationSet>
+          <AdaptationSet mimeType="text/vtt" lang="de"><SegmentTemplate media="$Number$.vtt"/><Representation id="p"/></AdaptationSet>
+          <AdaptationSet mimeType="video/mp4"><Representation id="v"><BaseURL>v.mp4</BaseURL></Representation></AdaptationSet>
+        </Period></MPD>"#;
+        let tracks = text_tracks(xml, &Url::parse("https://x/m.mpd").unwrap());
+        let got: Vec<_> = tracks.iter().map(|t| (t.url.as_str(), t.language.as_deref(), t.ext)).collect();
+        assert_eq!(got, [("https://x/a/en.vtt", Some("en"), "vtt"), ("https://x/a/fr.ttml", Some("fr"), "ttml")]);
+    }
+
     #[test]
     fn durations() {
         assert_eq!(parse_duration("PT1H2M3.5S"), Some(3723.5));
@@ -444,6 +667,34 @@ mod tests {
         assert_eq!(fill_template("v/$RepresentationID$/seg-$Number%05d$.m4s", "720p", 7, 0, 0), "v/720p/seg-00007.m4s");
         assert_eq!(fill_template("t_$Time$_$Bandwidth$.m4s", "x", 0, 9000, 128000), "t_9000_128000.m4s");
         assert_eq!(fill_template("a$$b", "x", 0, 0, 0), "a$b");
+    }
+
+    #[test]
+    fn the_longest_period_is_taken_not_the_ad_in_front_of_it() {
+        let period = |attrs: &str, dir: &str| {
+            format!(r#"<Period {attrs}><BaseURL>{dir}/</BaseURL><AdaptationSet contentType="video"><Representation id="v" bandwidth="1"><BaseURL>v.mp4</BaseURL></Representation></AdaptationSet></Period>"#)
+        };
+        let url = Url::parse("https://cdn.example.com/m.mpd").unwrap();
+        let wrap = |body: String| format!(r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10M15S">{body}</MPD>"#);
+        let got = |mpd: String| parse_mpd(&mpd, &url).unwrap()[0].segments[0].url.path().to_string();
+        let stated = period(r#"duration="PT15S""#, "ad") + &period(r#"duration="PT10M""#, "show");
+        assert_eq!(got(wrap(stated)), "/show/v.mp4");
+        // Without durations, the gaps between the starts tell the same thing.
+        let started = period(r#"start="PT0S""#, "ad") + &period(r#"start="PT15S""#, "show");
+        assert_eq!(got(wrap(started)), "/show/v.mp4");
+        assert_eq!(got(wrap(period("", "only"))), "/only/v.mp4");
+    }
+
+    #[test]
+    fn protected_streams_are_refused_with_a_clear_message() {
+        let mpd = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT10S"><Period>
+  <AdaptationSet contentType="video"><ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>
+   <Representation id="v" bandwidth="1"><BaseURL>v.mp4</BaseURL></Representation></AdaptationSet>
+</Period></MPD>"#;
+        let url = Url::parse("https://cdn.example.com/m.mpd").unwrap();
+        let e = parse_mpd(mpd, &url).err().unwrap().to_string();
+        assert!(e.contains("protected with DRM"), "{e}");
     }
 
     #[test]

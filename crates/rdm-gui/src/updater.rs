@@ -112,9 +112,29 @@ impl Updater {
                     return;
                 }
             };
+            if let Some(url) = &asset.sha256_url {
+                let check = match update::fetch_sha256(url).await {
+                    Ok(hash) => {
+                        let f = file.clone();
+                        tokio::task::spawn_blocking(move || update::verify_sha256(&f, &hash)).await.unwrap_or_else(|e| Err(e.to_string()))
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = check {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    *state.lock().unwrap() = State::Failed(e, Some(release));
+                    return;
+                }
+            }
             if update::opens_installer() {
                 let _ = open::that_detached(&file);
                 *state.lock().unwrap() = State::Opened(release);
+                return;
+            }
+            // The setup program does the installing, once RDM has closed for it.
+            if asset.name.ends_with(".exe") {
+                let _ = SETUP.set(file);
+                *state.lock().unwrap() = State::Ready(release);
                 return;
             }
             let Some(app_dir) = app_dir else {
@@ -146,10 +166,19 @@ impl Updater {
 }
 
 static RESTART: OnceLock<PathBuf> = OnceLock::new();
+/// A downloaded setup program, to run when RDM has closed.
+static SETUP: OnceLock<PathBuf> = OnceLock::new();
 
 /// Called by main after RDM has shut down: start the updated program if a restart was asked for.
 pub fn start_new_version_if_requested() {
     if let Some(exe) = RESTART.get() {
-        let _ = std::process::Command::new(exe).arg("--after-update").spawn();
+        match SETUP.get() {
+            Some(setup) => {
+                let _ = std::process::Command::new(setup).args(update::SETUP_ARGS).spawn();
+            }
+            None => {
+                let _ = std::process::Command::new(exe).arg("--after-update").spawn();
+            }
+        }
     }
 }

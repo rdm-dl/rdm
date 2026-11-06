@@ -40,6 +40,16 @@ pub enum Request {
     Capture,
     /// Media found in a page, offered to the user (video panel).
     Media { request: DownloadRequest, title: Option<String>, kind: String },
+    /// What a site with its own code offers for a page ([`crate::sites`]).
+    Site { url: String, cookies: Option<String> },
+    /// The episodes of a show's page, for the extension to play one after another.
+    Episodes { url: String },
+    /// Start what's waiting in the main queue.
+    StartQueue,
+    /// The browser's sign-in cookies for sites with their own code: (domain, cookie).
+    SignIn { list: Vec<(String, String)> },
+    /// Close the app, even when it would stay in the tray. Setup uses this.
+    Quit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,7 +70,21 @@ pub enum Response {
     Ok,
     Added { id: Option<ItemId> },
     Items { items: Vec<ItemSummary> },
-    Capture { settings: CaptureSettings },
+    Capture {
+        settings: CaptureSettings,
+        /// Domains the extension should ask about, with [`Request::Site`].
+        #[serde(default)]
+        sites: Vec<String>,
+        /// Which sign-in cookie to hand over for which domain, with [`Request::SignIn`].
+        #[serde(default)]
+        sign_ins: Vec<(String, String)>,
+        /// Domains where the extension plays a show's episodes itself.
+        #[serde(default)]
+        browser_sites: Vec<String>,
+    },
+    /// (address, folder, file name) of each episode.
+    Episodes { list: Vec<(String, String, String)> },
+    Site { url: String, title: Option<String>, duration: Option<u64> },
     Error { message: String },
 }
 
@@ -82,6 +106,7 @@ struct IpcInfo {
 #[derive(Debug, Clone)]
 pub enum UiRequest {
     Show,
+    Quit,
     /// Ask the user (file-info dialog) before adding.
     ConfirmAdd(DownloadRequest),
     ConfirmMany(Vec<DownloadRequest>),
@@ -131,6 +156,17 @@ async fn handle(sock: TcpStream, m: Manager, ui: Option<mpsc::UnboundedSender<Ui
     let mut lines = BufReader::new(r).lines();
     while let Some(line) = lines.next_line().await? {
         let resp = match serde_json::from_str::<Envelope>(&line) {
+            Ok(Envelope { token: t, request: Request::Site { url, cookies } }) if t == token => {
+                // Takes a few requests to the site, so it runs here and not with the quick ones.
+                match crate::sites::find_for_page(&url, cookies, &m.settings().engine).await {
+                    Ok(f) => Response::Site { url: f.url, title: f.title, duration: f.duration },
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
+            Ok(Envelope { token: t, request: Request::Episodes { url } }) if t == token => match crate::sites::episodes(&url, None, &m.settings().engine).await {
+                Ok(list) => Response::Episodes { list: list.iter().map(|e| (e.url.clone(), e.folder().to_string_lossy().replace('\\', "/"), e.file_name())).collect() },
+                Err(e) => Response::Error { message: e.to_string() },
+            },
             Ok(env) if env.token == token => dispatch(&m, ui.as_ref(), env.request),
             Ok(_) => Response::Error { message: "bad token".into() },
             Err(e) => Response::Error { message: format!("bad request: {e}") },
@@ -148,6 +184,12 @@ fn dispatch(m: &Manager, ui: Option<&mpsc::UnboundedSender<UiRequest>>, req: Req
         Request::Show => {
             if let Some(ui) = ui {
                 let _ = ui.send(UiRequest::Show);
+            }
+            Response::Ok
+        }
+        Request::Quit => {
+            if let Some(ui) = ui {
+                let _ = ui.send(UiRequest::Quit);
             }
             Response::Ok
         }
@@ -206,11 +248,24 @@ fn dispatch(m: &Manager, ui: Option<&mpsc::UnboundedSender<UiRequest>>, req: Req
                 s.extension_connected_once = true;
                 m.set_settings(s.clone());
             }
-            Response::Capture { settings: s.capture }
+            let sign_ins = crate::sites::sign_in_cookies().into_iter().map(|(d, n)| (d.to_string(), n.to_string())).collect();
+            let browser_sites = crate::sites::browser_hosts().into_iter().map(String::from).collect();
+            Response::Capture { settings: s.capture, sites: crate::sites::hosts().into_iter().map(String::from).collect(), sign_ins, browser_sites }
         }
         Request::Media { request, title, kind } => {
             if let Some(ui) = ui {
                 let _ = ui.send(UiRequest::Media { request, title, kind });
+            }
+            Response::Ok
+        }
+        Request::Site { .. } | Request::Episodes { .. } => Response::Error { message: "handled above".into() },
+        Request::StartQueue => {
+            m.start_queue(crate::settings::MAIN_QUEUE);
+            Response::Ok
+        }
+        Request::SignIn { list } => {
+            for (domain, cookie) in list {
+                crate::sites::remember_sign_in(&domain, &cookie);
             }
             Response::Ok
         }

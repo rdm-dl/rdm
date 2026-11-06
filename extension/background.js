@@ -66,6 +66,7 @@ async function refreshSettings() {
   }
   if (typeof stored.enabled === "boolean") settings.enabled = stored.enabled;
   if (JSON.stringify(settings) !== before) broadcast({ type: "rdm-settings" });
+  if (reply.type === "settings") shareSignIns();
   return reply;
 }
 
@@ -291,6 +292,7 @@ function forgetTab(tabId) {
   children.delete(tabId);
   yt.delete(tabId);
   ytPending.delete(tabId);
+  siteTried.delete(tabId);
   saveState();
 }
 
@@ -307,17 +309,49 @@ function resolve(base, rel) {
   }
 }
 
-// Fetch a playlist/manifest and describe it: qualities, duration, referenced child playlists.
-async function inspectManifest(url, dash) {
-  const out = { qualities: [], duration: 0, kids: [], master: false };
-  let text = "";
+// A media playlist that is only sound: by its segments, or by its address.
+const AUDIO_SEGMENT = /\.(aac|mp3|m4a|oga|opus)(\?|$)/i;
+const AUDIO_PATH = /(^|[/_.-])(audio|aud)([/_.-]|\d|$)/i;
+
+async function readDirect(url, headers) {
   try {
-    const r = await fetch(url, { credentials: "include" });
-    if (!r.ok) return out;
-    text = await r.text();
+    const r = await fetch(url, { credentials: "include", headers });
+    return r.ok ? await r.text() : "";
   } catch {
-    return out;
+    return "";
   }
+}
+
+// A server may answer only the player's own origin, which an extension's request can't claim.
+// The frame the player runs in can ask with that origin, the way the player itself did.
+async function readInFrame(url, headers, frame) {
+  if (!frame || frame.tabId == null || frame.tabId < 0) return "";
+  try {
+    const target = frame.frameId ? { tabId: frame.tabId, frameIds: [frame.frameId] } : { tabId: frame.tabId };
+    const [res] = await api.scripting.executeScript({
+      target,
+      func: async (u, h) => {
+        try {
+          const r = await fetch(u, { headers: h });
+          return r.ok ? await r.text() : "";
+        } catch {
+          return "";
+        }
+      },
+      args: [url, headers || {}],
+    });
+    return res?.result || "";
+  } catch {
+    return "";
+  }
+}
+
+// Fetch a playlist/manifest and describe it: qualities, duration, referenced child playlists.
+async function inspectManifest(url, dash, headers, frame) {
+  const out = { qualities: [], duration: 0, kids: [], master: null, audioOnly: false };
+  const text = (await readDirect(url, headers)) || (await readInFrame(url, headers, frame));
+  if (!text) return out;
+  out.master = false;
   if (dash) {
     const heights = new Set();
     for (const m of text.matchAll(/<Representation\b[^>]*\bheight="(\d+)"/g)) heights.add(+m[1]);
@@ -350,6 +384,8 @@ async function inspectManifest(url, dash) {
       const m = /^#EXTINF:([\d.]+)/.exec(l);
       if (m) out.duration += +m[1];
     }
+    const first = lines.find((l) => l && !l.startsWith("#")) || "";
+    out.audioOnly = AUDIO_SEGMENT.test(first) || AUDIO_PATH.test(new URL(url).pathname);
   }
   return out;
 }
@@ -371,16 +407,27 @@ function addMedia(tabId, info) {
 }
 
 // The Referer / Origin the browser actually sent for each media request. Players embedded
-// from another site send their own origin, and stream servers often insist on it.
-const sentHeaders = new Map(); // url -> { referer, origin, t }
+// from another site send their own origin, and stream servers often insist on it. The same
+// goes for headers a player adds itself: an access token, a session or device id.
+const sentHeaders = new Map(); // url -> { referer, origin, headers, t }
+const PLAYER_HEADER = /^(authorization|x-[a-z0-9-]+)$/i;
+const BROWSER_HEADER = /^x-(client-data|browser-|chrome-|requested-with$)/i;
+
+function playerHeaders(list) {
+  const out = {};
+  for (const h of list) if (PLAYER_HEADER.test(h.name) && !BROWSER_HEADER.test(h.name)) out[h.name] = h.value;
+  return out;
+}
 
 function onSendHeaders(d) {
-  if (d.tabId < 0) return;
+  // A preflight carries none of the player's headers; the real request follows.
+  if (d.tabId < 0 || d.method === "OPTIONS") return;
   const h = d.requestHeaders || [];
   const referer = headerValue(h, "referer");
   const origin = headerValue(h, "origin");
-  if (!referer && !origin) return;
-  sentHeaders.set(d.url.split("#")[0], { referer, origin, t: Date.now() });
+  const headers = playerHeaders(h);
+  if (!referer && !origin && !Object.keys(headers).length) return;
+  sentHeaders.set(d.url.split("#")[0], { referer, origin, headers, t: Date.now() });
   if (sentHeaders.size > 2000) {
     for (const [u, v] of sentHeaders) if (Date.now() - v.t > 10 * 60 * 1000) sentHeaders.delete(u);
   }
@@ -394,11 +441,188 @@ try {
 
 function requestContext(url) {
   const h = sentHeaders.get(url.split("#")[0]);
-  return h ? { referer: h.referer || "", origin: h.origin || "" } : {};
+  return h ? { referer: h.referer || "", origin: h.origin || "", headers: h.headers } : {};
+}
+
+// The headers to repeat for a download, from what was recorded for it.
+function repeatHeaders(ctx) {
+  const headers = { ...(ctx.headers || {}), ...(ctx.origin ? { Origin: ctx.origin } : {}) };
+  return Object.keys(headers).length ? headers : undefined;
+}
+
+// An audio playlist the player loaded next to this video playlist, with no master playlist
+// that says they belong together. Only ever one on the same server: anything less clear-cut
+// is left alone rather than risking the wrong sound.
+function loneAudio(tabId, item) {
+  if (!item || item.kind !== "stream" || item.master !== false || item.audioOnly) return "";
+  const host = (u) => new URL(u).host;
+  const audio = [...(media.get(tabId)?.values() || [])].filter((m) => m.audioOnly && host(m.url) === host(item.url));
+  return audio.length === 1 ? audio[0].url : "";
+}
+
+// Whole shows on sites where only the player can open a stream, because the viewer's TV provider
+// unlocks each episode. The extension plays them one at a time, catches each stream as the player
+// loads it (before any ad), hands it to RDM's queue and closes the tab.
+const SHOW_PAGE = /^\/shows\/[^/]+(\/season-\d+)?\/?$/;
+const showRun = { list: [], at: 0, tab: null, timers: [], failed: [], saved: 0, running: false };
+
+function isShowPage(url) {
+  if (!YOUTUBE_SUPPORT || !url || !URL.canParse(url)) return false;
+  const u = new URL(url);
+  const list = SHOW_PAGE.test(u.pathname) || (u.pathname === "/playlist" && u.searchParams.has("list"));
+  return list && (settings.browser_sites || []).some((d) => u.hostname === d || u.hostname.endsWith(`.${d}`));
+}
+
+// YouTube needs no stream caught: once the player has its session, RDM can do the rest.
+function isYouTube(url) {
+  return /(^|\.)youtube\.com$/.test(new URL(url).hostname);
+}
+
+function catchYouTube(tabId) {
+  if (tabId == null || tabId !== showRun.tab || showRun.catching === tabId) return;
+  const item = showRun.list[showRun.at];
+  const videoId = new URL(item.page).searchParams.get("v");
+  const v = yt.get(tabId)?.get(videoId);
+  if (!v || !(v.pot || tabPot.get(tabId))) return;
+  const entries = ytEntries(v).filter((e) => e.kind === "yt");
+  const pick = item.name.endsWith(".m4a") ? entries.find((e) => e.ext === "m4a") : entries.find((e) => e.ext === "mp4");
+  if (!pick) return;
+  showRun.catching = tabId;
+  downloadMedia({ ...pick, kind: "yt", videoId, filename: item.name, folder: item.folder, queued: true }, { id: tabId, url: item.page, title: item.name }).then(async (reply) => {
+    if (reply.type === "accepted") await send({ type: "start-queue" });
+    endEpisode(reply.type !== "accepted");
+  });
+}
+
+async function listShow(url) {
+  const reply = await send({ type: "episodes", url });
+  if (reply.type !== "episodes") return { error: reply.message || "RDM didn't answer" };
+  return { list: reply.list.map(([page, folder, name]) => ({ page, folder, name })) };
+}
+
+function clearShowTimers() {
+  showRun.timers.forEach(clearTimeout);
+  showRun.timers = [];
+}
+
+async function endEpisode(failed) {
+  clearShowTimers();
+  const { tab, list, at } = showRun;
+  showRun.tab = null;
+  if (failed) showRun.failed.push(list[at].name);
+  else showRun.saved += 1;
+  if (tab != null) await api.tabs.remove(tab).catch(() => {});
+  showRun.at += 1;
+  nextEpisode();
+}
+
+async function nextEpisode() {
+  const item = showRun.list[showRun.at];
+  if (!item) {
+    showRun.running = false;
+    broadcast({ type: "rdm-show" });
+    return;
+  }
+  const tab = await api.tabs.create({ url: item.page, active: false });
+  showRun.tab = tab.id;
+  api.tabs.update(tab.id, { muted: true }).catch(() => {});
+  // Some players won't start in a hidden tab: bring it forward if nothing has come.
+  showRun.timers.push(setTimeout(() => api.tabs.update(tab.id, { active: true }).catch(() => {}), 12000));
+  showRun.timers.push(setTimeout(() => endEpisode(true), 45000));
+}
+
+async function catchEpisode(tabId, url) {
+  const item = showRun.list[showRun.at];
+  const ctx = requestContext(url.split("#")[0]);
+  const reply = await send({
+    type: "download",
+    ...(await payload(`${url}#rdm-kind=hls`, { referrer: ctx.referer || item.page, filename: item.name, folder: item.folder, headers: repeatHeaders(ctx), queued: true })),
+  });
+  if (reply.type === "accepted") await send({ type: "start-queue" });
+  endEpisode(reply.type !== "accepted");
+}
+
+async function startShow(list) {
+  if (showRun.running) return;
+  Object.assign(showRun, { list, at: 0, tab: null, failed: [], saved: 0, running: true });
+  nextEpisode();
+}
+
+function stopShow() {
+  clearShowTimers();
+  if (showRun.tab != null) api.tabs.remove(showRun.tab).catch(() => {});
+  Object.assign(showRun, { list: [], tab: null, running: false });
+}
+
+// A whole show is added from RDM's own window, where there's no browser to ask: hand over the
+// one sign-in cookie of each site RDM names, nothing else, and only to RDM on this computer.
+let signInTimer = 0;
+async function shareSignIns() {
+  if (!YOUTUBE_SUPPORT) return; // same store rules
+  const list = [];
+  for (const [domain, name] of settings.sign_ins || []) {
+    const found = await api.cookies.getAll({ domain, name }).catch(() => []);
+    found.sort((a, b) => b.domain.length - a.domain.length);
+    if (found[0]) list.push([domain, `${name}=${found[0].value}`]);
+  }
+  if (list.length) await send({ type: "sign-in", list });
+}
+
+api.cookies.onChanged.addListener(({ cookie }) => {
+  const named = (settings.sign_ins || []).some(([d, n]) => n === cookie.name && cookie.domain.endsWith(d));
+  if (!named) return;
+  clearTimeout(signInTimer);
+  signInTimer = setTimeout(shareSignIns, 1500);
+});
+
+// Some sites need more than the stream their player loads. RDM has code for those (its
+// `sites` folder) and names their domains; for a page there, it says what to download.
+const siteTried = new Map(); // tabId -> { page, found: Promise<boolean> }
+
+async function siteFetch(tabId, page, domain) {
+  // A sign-in often sits on the site's API server, not on the page's own host: take the whole
+  // domain, the most specific hosts first. These only go to RDM on this computer.
+  const list = await api.cookies.getAll({ domain }).catch(() => []);
+  list.sort((a, b) => b.domain.length - a.domain.length);
+  const cookies = list.map((c) => `${c.name}=${c.value}`).join("; ");
+  const reply = await send({ type: "site", url: page, cookies });
+  if (reply.type !== "site") {
+    // Kept for troubleshooting, in RDM's diagnostics folder: names only, never values.
+    const u = new URL(page);
+    await send({ type: "diag", data: { siteFailed: reply.message, version: api.runtime.getManifest().version, at: new Date().toISOString(), host: u.hostname, path: u.pathname, cookies: list.map((c) => `${c.domain} ${c.name}`) } });
+    return false;
+  }
+  await consider(tabId, reply.url, "application/vnd.apple.mpegurl", 0, 0, 0, true);
+  const key = reply.url.split("#")[0];
+  const item = media.get(tabId)?.get(key);
+  if (item && !item.duration) item.duration = reply.duration || 0;
+  if (item && reply.title) item.title = reply.title;
+  for (const [url, m] of media.get(tabId) || []) if (m.kind === "stream" && url !== key) media.get(tabId).delete(url);
+  saveState();
+  updateBadge(tabId);
+  notifyTab(tabId);
+  return true;
+}
+
+// True when RDM has this tab's video, so the stream the player loaded isn't wanted.
+async function siteFind(tabId) {
+  if (!YOUTUBE_SUPPORT) return false; // same store rules
+  const tab = await api.tabs.get(tabId).catch(() => null);
+  const host = tab?.url && new URL(tab.url).hostname;
+  if (!host) return false;
+  if (!settings.sites) await refreshSettings();
+  const domain = (settings.sites || []).find((d) => host === d || host.endsWith(`.${d}`));
+  if (!domain) return false;
+  let tried = siteTried.get(tabId);
+  if (tried?.page !== tab.url) {
+    tried = { page: tab.url, found: siteFetch(tabId, tab.url, domain) };
+    siteTried.set(tabId, tried);
+  }
+  return tried.found;
 }
 
 // Classify one response (from webRequest or from the page hooks) and remember it.
-async function consider(tabId, url, type, size, total) {
+async function consider(tabId, url, type, size, total, frameId, ordinary) {
   if (tabId == null || tabId < 0) return;
   if (/\.googlevideo\.com\//i.test(url)) return;
   await loadState();
@@ -414,6 +638,15 @@ async function consider(tabId, url, type, size, total) {
     return;
   }
   if (!isMedia && !isManifest) return;
+  if (tabId === showRun.tab && isManifest && !isYouTube(showRun.list[showRun.at].page) && /master|index/i.test(key.split("?")[0].split("/").pop())) {
+    // One episode, one stream, whatever else the page loads.
+    if (showRun.catching !== tabId) {
+      showRun.catching = tabId;
+      catchEpisode(tabId, url);
+    }
+    return;
+  }
+  if (isManifest && !ordinary && (await siteFind(tabId))) return;
   if (!isManifest) {
     // Skip fragments of segmented streams and tiny files; keep the playlist/manifest instead.
     if (SEGMENT_EXT.test(url) || /[?&](range|bytes)=/i.test(url)) return;
@@ -422,7 +655,7 @@ async function consider(tabId, url, type, size, total) {
     return;
   }
   const dash = /\.mpd(\?|$)/i.test(url) || /dash\+xml/i.test(type);
-  const info = await inspectManifest(key, dash);
+  const info = await inspectManifest(key, dash, ctx.headers, { tabId, frameId });
   if (children.get(tabId)?.has(key)) return;
   if (info.kids.length) {
     let kids = children.get(tabId);
@@ -435,8 +668,10 @@ async function consider(tabId, url, type, size, total) {
   addMedia(tabId, {
     url: key,
     kind: "stream",
-    type: dash ? "DASH stream" : "HLS stream",
+    type: dash ? "DASH stream" : info.audioOnly ? "HLS audio" : "HLS stream",
     qualities: info.qualities,
+    master: info.master,
+    audioOnly: info.audioOnly,
     duration: Math.round(info.duration),
     size: 0,
     found: Date.now(),
@@ -446,12 +681,14 @@ async function consider(tabId, url, type, size, total) {
 
 api.webRequest.onHeadersReceived.addListener(
   (d) => {
-    if (d.tabId < 0 || d.statusCode >= 400) return;
+    if (d.tabId < 0 || d.statusCode >= 400 || d.method === "OPTIONS") return;
+    // Players POST to an address like this to set up a session; the stream comes after it.
+    if (d.method === "POST" && MANIFEST_EXT.test(d.url)) return;
     const type = headerValue(d.responseHeaders, "content-type").split(";")[0].trim();
     const size = parseInt(headerValue(d.responseHeaders, "content-length") || "0", 10);
     const range = headerValue(d.responseHeaders, "content-range");
     const total = range ? parseInt(range.split("/")[1], 10) || 0 : 0;
-    consider(d.tabId, d.url, type, size, total);
+    consider(d.tabId, d.url, type, size, total, d.frameId);
   },
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object"] },
   ["responseHeaders"]
@@ -462,6 +699,8 @@ api.tabs.onUpdated.addListener(async (tabId, info) => {
     await loadState();
     forgetTab(tabId);
     updateBadge(tabId);
+    const host = URL.canParse(info.url) ? new URL(info.url).hostname : "";
+    if ((settings.sign_ins || []).some(([d]) => host === d || host.endsWith(`.${d}`))) shareSignIns();
   }
 });
 api.tabs.onRemoved.addListener(async (tabId) => {
@@ -480,7 +719,9 @@ function updateBadge(tabId) {
 
 function mediaList(tabId, pageUrl) {
   const rank = { stream: 0, file: 1, subtitle: 2 };
-  const own = [...(media.get(tabId)?.values() || [])].sort((a, b) => rank[a.kind] - rank[b.kind] || b.found - a.found);
+  const own = [...(media.get(tabId)?.values() || [])]
+    .map((m) => (loneAudio(tabId, m) ? { ...m, type: `${m.type} + audio` } : m))
+    .sort((a, b) => rank[a.kind] - rank[b.kind] || b.found - a.found);
   return [...ytList(tabId, pageUrl), ...own];
 }
 
@@ -518,27 +759,28 @@ async function downloadMedia(msg, tab) {
     const watch = `https://www.youtube.com/watch?v=${msg.videoId}#rdm-yt`;
     return send({
       type: "download",
-      ...(await payload(watch, { referrer: tab?.url || "", filename: safeName(job.title || tab?.title, msg.ext || "mp4"), postData: JSON.stringify(job) })),
+      ...(await payload(watch, { referrer: tab?.url || "", filename: msg.filename || safeName(job.title || tab?.title, msg.ext || "mp4"), postData: JSON.stringify(job), folder: msg.folder, queued: msg.queued })),
     });
   }
   const isStream = /\.(m3u8|mpd)(\?|$)/i.test(msg.url) || msg.kind === "stream";
   // Tell RDM it is a stream (playlist URLs often have no .m3u8/.mpd) and which quality.
   const known = tab && tab.id != null ? media.get(tab.id)?.get(msg.url.split("#")[0]) : null;
   const kind = isStream ? (/dash/i.test((known && known.type) || "") || /\.mpd(\?|$)/i.test(msg.url) ? "dash" : "hls") : "";
-  const hints = [msg.quality ? `rdm-quality=${msg.quality}` : "", kind ? `rdm-kind=${kind}` : ""].filter(Boolean).join("&");
+  const audio = known ? loneAudio(tab.id, known) : "";
+  const hints = [audio ? pairUrl("", audio).slice(1) : "", msg.quality ? `rdm-quality=${msg.quality}` : "", kind ? `rdm-kind=${kind}` : ""].filter(Boolean).join("&");
   const quality = hints ? `#${hints}` : "";
-  const title = msg.title || tab?.title;
+  const title = known?.title || msg.title || tab?.title;
   let filename = msg.filename;
   if (!filename && isStream) filename = safeName(title, "mp4");
   if (!filename && msg.kind === "subtitle") filename = safeName(title, extensionOf(msg.url) || "vtt");
   // Send what the browser sent: the embedded player's Referer and Origin, not the page's.
   const key = msg.url.split("#")[0];
   const item = (tab && tab.id != null && media.get(tab.id)?.get(key)) || {};
-  const ctx = { ...requestContext(key), ...Object.fromEntries(Object.entries({ referer: item.referer, origin: item.origin }).filter(([, v]) => v)) };
-  const headers = ctx.origin ? { Origin: ctx.origin } : undefined;
+  const seen = requestContext(key);
+  const ctx = { ...seen, ...Object.fromEntries(Object.entries({ referer: item.referer, origin: item.origin }).filter(([, v]) => v)), headers: { ...(seen.headers || {}), ...(item.headers || {}) } };
   return send({
     type: "download",
-    ...(await payload(msg.url + quality, { referrer: ctx.referer || msg.referrer || tab?.url || "", filename, headers })),
+    ...(await payload(msg.url + quality, { referrer: ctx.referer || msg.referrer || tab?.url || "", filename, headers: repeatHeaders(ctx) })),
   });
 }
 
@@ -671,6 +913,7 @@ function ytOnPlayer(tabId, data) {
   if (data.hls && !data.live) consider(tabId, data.hls, "application/x-mpegurl", 0, 0);
   updateBadge(tabId);
   notifyTab(tabId);
+  catchYouTube(tabId);
 }
 
 const tabPot = new Map(); // tabId -> latest token from that tab's player
@@ -715,6 +958,7 @@ function ytOnRequest(d, replay) {
     }
     diag("sabr-body", { tabId: d.tabId, videoId: latest && latest.videoId, bodyBytes: raw ? raw.byteLength : 0, shape, pot: pot ? `${pot.length} chars` : "" });
     if (pot) tabPot.set(d.tabId, pot);
+    if (pot) catchYouTube(d.tabId);
     if (latest) {
       latest.sabrSeen = true;
       if (pot) {
@@ -967,7 +1211,7 @@ api.contextMenus.onClicked.addListener(async (info, tab) => {
     await send({ type: "download", ...(await payload(info.linkUrl, { referrer, title: info.selectionText || info.linkText })) });
   } else if (info.menuItemId === "rdm-media" && info.srcUrl) {
     const ctx = requestContext(info.srcUrl);
-    await send({ type: "download", ...(await payload(info.srcUrl, { referrer: ctx.referer || referrer, headers: ctx.origin ? { Origin: ctx.origin } : undefined })) });
+    await send({ type: "download", ...(await payload(info.srcUrl, { referrer: ctx.referer || referrer, headers: repeatHeaders(ctx) })) });
   } else if ((info.menuItemId === "rdm-all" || info.menuItemId === "rdm-selection") && tab && tab.id != null) {
     const target = info.frameId ? { tabId: tab.id, frameIds: [info.frameId] } : { tabId: tab.id };
     const [res] = await api.scripting.executeScript({ target, func: collectLinks, args: [info.menuItemId === "rdm-selection"] });
@@ -997,9 +1241,20 @@ api.runtime.onMessage.addListener((msg, sender, respond) => {
       case "state": {
         if (!connected) await refreshSettings();
         const b = await buttonSettings();
-        respond({ connected, enabled: settings.enabled, show_button: b.show_button, blocked_hosts: b.blocked_hosts, media: mediaList(msg.tabId, msg.pageUrl) });
+        respond({ connected, enabled: settings.enabled, show_button: b.show_button, blocked_hosts: b.blocked_hosts, media: mediaList(msg.tabId, msg.pageUrl) , show: { page: isShowPage(msg.pageUrl), running: showRun.running, at: showRun.at, total: showRun.list.length, saved: showRun.saved, failed: showRun.failed } });
         break;
       }
+      case "show-list":
+        respond(await listShow(msg.url));
+        break;
+      case "show-start":
+        await startShow(msg.list);
+        respond({ ok: true });
+        break;
+      case "show-stop":
+        stopShow();
+        respond({ ok: true });
+        break;
       case "content-hello":
         diag("content", { tabId: sender.tab?.id, frame: sender.frameId, url: (msg.url || "").slice(0, 120), docHook: msg.docHook });
         respond({ ok: true });
@@ -1050,7 +1305,7 @@ api.runtime.onMessage.addListener((msg, sender, respond) => {
         respond({ ok: true });
         break;
       case "page-request":
-        consider(sender.tab?.id, msg.url, msg.mime || "", msg.size || 0, 0);
+        consider(sender.tab?.id, msg.url, msg.mime || "", msg.size || 0, 0, sender.frameId);
         respond({ ok: true });
         break;
       case "toggle":

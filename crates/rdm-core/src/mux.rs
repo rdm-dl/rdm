@@ -237,13 +237,13 @@ pub mod mp4 {
             (Ok(v), Ok(a)) => (v, a),
             _ => return Ok(false),
         };
-        if v.traks.len() != 1 || a.traks.len() != 1 {
+        // The video file may carry more than the picture (captions): those tracks stay.
+        if v.traks.is_empty() || a.traks.len() != 1 {
             return Ok(false);
         }
         let v_ts = trak_timescale(&v.traks[0]).unwrap_or(1);
         let a_ts = trak_timescale(&a.traks[0]).unwrap_or(1);
-        let v_id = trak_id(&v.traks[0]).unwrap_or(1);
-        let a_id = v_id + 1;
+        let a_id = v.traks.iter().filter_map(|t| trak_id(t)).max().unwrap_or(1) + 1;
 
         // New moov: video moov with the audio trak added and the audio trex in mvex.
         let mut a_trak = a.traks[0].clone();
@@ -257,6 +257,7 @@ pub mod mp4 {
         let mut a_trex = a_trex;
         set_u32(&mut a_trex, 4, a_id);
         let mut moov = vec![];
+        let mut traks_left = v.traks.len();
         for (o, s, k) in children(&v.moov) {
             let h = header_len(&v.moov, o);
             let body = &v.moov[o + h..o + s];
@@ -271,7 +272,10 @@ pub mod mp4 {
                 }
                 b"trak" => {
                     moov.extend(make_box(b"trak", body));
-                    moov.extend(make_box(b"trak", &a_trak));
+                    traks_left -= 1;
+                    if traks_left == 0 {
+                        moov.extend(make_box(b"trak", &a_trak));
+                    }
                 }
                 b"mvex" => {
                     let mut mvex = body.to_vec();
@@ -332,6 +336,741 @@ pub mod mp4 {
         }
         w.flush()?;
         Ok(true)
+    }
+    fn handler(trak: &[u8]) -> Option<[u8; 4]> {
+        let mdia = &trak[payload(trak, b"mdia")?];
+        let p = &mdia[payload(mdia, b"hdlr")?];
+        p.get(8..12)?.try_into().ok()
+    }
+
+    /// Whether this is a fragmented MP4 holding one audio track and nothing else.
+    pub fn is_audio_only(path: &Path) -> bool {
+        let Ok(mut f) = File::open(path) else { return false };
+        load(&mut f).is_ok_and(|m| m.traks.len() == 1 && handler(&m.traks[0]) == Some(*b"soun"))
+    }
+
+    fn be32(b: &[u8], at: usize) -> Option<u32> {
+        Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
+    }
+
+    /// What a track's `trex` box says about samples that don't say for themselves.
+    #[derive(Default, Clone, Copy)]
+    struct Defaults {
+        duration: u32,
+        size: u32,
+        flags: u32,
+    }
+
+    /// Samples of a fragmented track, gathered from its `moof` boxes.
+    #[derive(Default)]
+    struct Samples {
+        /// Where each run of samples is in the file: offset, bytes, samples.
+        runs: Vec<(u64, u64, u32)>,
+        sizes: Vec<u32>,
+        durations: Vec<u32>,
+        /// Display time minus decode time, for pictures that aren't stored in display order.
+        shifts: Vec<i32>,
+        keyframes: Vec<bool>,
+        /// Decode time of the first sample, and of the end of the last.
+        first: Option<u64>,
+        end: u64,
+        /// Samples stand on their own, so leaving some out harms nothing: sound.
+        can_trim: bool,
+    }
+
+    /// The tracks a `traf` box belongs to is named in its `tfhd`.
+    fn traf_track(traf: &[u8]) -> Option<u32> {
+        be32(&traf[payload(traf, b"tfhd")?], 4)
+    }
+
+    impl Samples {
+        /// Read one track's part of a fragment. `start` is the fragment's offset, `previous` where
+        /// the track before it in this fragment ended. Returns where this one ended.
+        fn read_traf(&mut self, traf: &[u8], start: u64, previous: u64, defaults: Defaults) -> Option<u64> {
+            let tfhd = &traf[payload(traf, b"tfhd")?];
+            let flags = be32(tfhd, 0)? & 0xFF_FFFF;
+            let mut p = 8;
+            let mut base = if flags & 0x2_0000 != 0 { start } else { previous };
+            if flags & 1 != 0 {
+                base = u64::from_be_bytes(tfhd.get(p..p + 8)?.try_into().ok()?);
+                p += 8;
+            }
+            if flags & 2 != 0 {
+                // A second sample description can't be told apart once this is one table.
+                if be32(tfhd, p)? != 1 {
+                    return None;
+                }
+                p += 4;
+            }
+            let Defaults { mut duration, mut size, flags: mut sample_flags } = defaults;
+            if flags & 8 != 0 {
+                duration = be32(tfhd, p)?;
+                p += 4;
+            }
+            if flags & 0x10 != 0 {
+                size = be32(tfhd, p)?;
+                p += 4;
+            }
+            if flags & 0x20 != 0 {
+                sample_flags = be32(tfhd, p)?;
+            }
+            let mut overlap = 0i64;
+            if let Some(r) = payload(traf, b"tfdt") {
+                let tfdt = &traf[r];
+                let time = if tfdt[0] == 1 { u64::from_be_bytes(tfdt.get(4..12)?.try_into().ok()?) } else { u64::from(be32(tfdt, 4)?) };
+                match self.first {
+                    None => {
+                        self.first = Some(time);
+                        self.end = time;
+                    }
+                    // A plain file has no decode times, only durations: a gap in the stream
+                    // goes into the sample before it, or the sound would drift off the picture.
+                    Some(_) => {
+                        let moved = time as i64 - self.end as i64;
+                        let last = self.durations.last().map_or(0, |d| i64::from(*d));
+                        if self.can_trim && moved < -last {
+                            // This part starts before the last one ended. Playing that twice
+                            // would put the sound behind for the rest of the file.
+                            overlap = -moved;
+                        } else {
+                            if let Some(last) = self.durations.last_mut() {
+                                *last = i64::from(*last).saturating_add(moved).clamp(0, i64::from(u32::MAX)) as u32;
+                            }
+                            self.end = time;
+                        }
+                    }
+                }
+            }
+            let mut next = None;
+            for (o, s, k) in children(traf) {
+                if &k != b"trun" {
+                    continue;
+                }
+                let run = &traf[o + header_len(traf, o)..o + s];
+                let flags = be32(run, 0)? & 0xFF_FFFF;
+                let count = be32(run, 4)?;
+                let mut p = 8;
+                let mut offset = next.unwrap_or(base);
+                if flags & 1 != 0 {
+                    offset = (base as i64 + i64::from(be32(run, p)? as i32)) as u64;
+                    p += 4;
+                }
+                let mut first_flags = None;
+                if flags & 4 != 0 {
+                    first_flags = Some(be32(run, p)?);
+                    p += 4;
+                }
+                let mut bytes = 0u64;
+                let mut skipped = 0u64;
+                let mut kept = 0u32;
+                for i in 0..count {
+                    let (mut d, mut z, mut f) = (duration, size, sample_flags);
+                    if i == 0 {
+                        f = first_flags.unwrap_or(f);
+                    }
+                    if flags & 0x100 != 0 {
+                        d = be32(run, p)?;
+                        p += 4;
+                    }
+                    if flags & 0x200 != 0 {
+                        z = be32(run, p)?;
+                        p += 4;
+                    }
+                    if flags & 0x400 != 0 {
+                        f = be32(run, p)?;
+                        p += 4;
+                    }
+                    let mut shift = 0;
+                    if flags & 0x800 != 0 {
+                        shift = be32(run, p)? as i32;
+                        p += 4;
+                    }
+                    if overlap >= i64::from(d) && overlap > 0 && kept == 0 {
+                        overlap -= i64::from(d);
+                        skipped += u64::from(z);
+                        continue;
+                    }
+                    self.durations.push(d);
+                    self.sizes.push(z);
+                    self.shifts.push(shift);
+                    self.keyframes.push(f & 0x1_0000 == 0);
+                    self.end += u64::from(d);
+                    bytes += u64::from(z);
+                    kept += 1;
+                }
+                if kept > 0 {
+                    self.runs.push((offset + skipped, bytes, kept));
+                }
+                next = Some(offset + skipped + bytes);
+            }
+            next.or(Some(previous))
+        }
+
+        /// One track's samples out of a fragment holding any number of tracks.
+        fn read_moof(&mut self, moof: &[u8], start: u64, defaults: Defaults) -> Option<()> {
+            let mut previous = start;
+            for (o, s, k) in children(moof) {
+                if &k == b"traf" {
+                    previous = self.read_traf(&moof[o + header_len(moof, o)..o + s], start, previous, defaults)?;
+                }
+            }
+            Some(())
+        }
+
+        fn stts(&self) -> Vec<u8> {
+            let mut same: Vec<(u32, u32)> = vec![];
+            for &d in &self.durations {
+                match same.last_mut() {
+                    Some((n, v)) if *v == d => *n += 1,
+                    _ => same.push((1, d)),
+                }
+            }
+            let mut b = vec![0u8; 4];
+            b.extend_from_slice(&(same.len() as u32).to_be_bytes());
+            same.iter().for_each(|(n, d)| b.extend([n.to_be_bytes(), d.to_be_bytes()].concat()));
+            b
+        }
+
+        fn stsc(&self) -> Vec<u8> {
+            let mut changes: Vec<(u32, u32)> = vec![];
+            for (i, (_, _, count)) in self.runs.iter().enumerate() {
+                if changes.last().is_none_or(|l| l.1 != *count) {
+                    changes.push((i as u32 + 1, *count));
+                }
+            }
+            let mut b = vec![0u8; 4];
+            b.extend_from_slice(&(changes.len() as u32).to_be_bytes());
+            changes.iter().for_each(|(chunk, n)| b.extend([chunk.to_be_bytes(), n.to_be_bytes(), 1u32.to_be_bytes()].concat()));
+            b
+        }
+
+        fn stsz(&self) -> Vec<u8> {
+            let mut b = vec![0u8; 8];
+            b.extend_from_slice(&(self.sizes.len() as u32).to_be_bytes());
+            self.sizes.iter().for_each(|s| b.extend_from_slice(&s.to_be_bytes()));
+            b
+        }
+
+        fn co64(&self, first: u64) -> Vec<u8> {
+            let mut b = vec![0u8; 4];
+            b.extend_from_slice(&(self.runs.len() as u32).to_be_bytes());
+            let mut at = first;
+            for (_, bytes, _) in &self.runs {
+                b.extend_from_slice(&at.to_be_bytes());
+                at += bytes;
+            }
+            b
+        }
+
+        /// How far display order runs ahead of decode order, as the `ctts` table wants it: never
+        /// below zero. `None` when every picture is stored in display order.
+        fn ctts(&self) -> Option<Vec<u8>> {
+            let lowest = self.shifts.iter().copied().min()?;
+            let mut same: Vec<(u32, u32)> = vec![];
+            for s in &self.shifts {
+                let shift = (i64::from(*s) - i64::from(lowest)) as u32;
+                match same.last_mut() {
+                    Some((n, v)) if *v == shift => *n += 1,
+                    _ => same.push((1, shift)),
+                }
+            }
+            if same.len() == 1 && same[0].1 == 0 {
+                return None;
+            }
+            let mut b = vec![0u8; 4];
+            b.extend_from_slice(&(same.len() as u32).to_be_bytes());
+            same.iter().for_each(|(n, d)| b.extend([n.to_be_bytes(), d.to_be_bytes()].concat()));
+            Some(b)
+        }
+
+        /// The samples a player can jump to, or `None` when it can jump to any of them.
+        fn stss(&self) -> Option<Vec<u8>> {
+            if self.keyframes.iter().all(|k| *k) {
+                return None;
+            }
+            let marks: Vec<u32> = self.keyframes.iter().enumerate().filter(|(_, k)| **k).map(|(i, _)| i as u32 + 1).collect();
+            let mut b = vec![0u8; 4];
+            b.extend_from_slice(&(marks.len() as u32).to_be_bytes());
+            marks.iter().for_each(|m| b.extend_from_slice(&m.to_be_bytes()));
+            Some(b)
+        }
+
+        /// Chunk offsets, given where each of this track's chunks ended up.
+        fn chunk_table(places: &[u64], wide: bool) -> Vec<u8> {
+            let mut b = vec![0u8; 4];
+            b.extend_from_slice(&(places.len() as u32).to_be_bytes());
+            for at in places {
+                if wide {
+                    b.extend_from_slice(&at.to_be_bytes());
+                } else {
+                    b.extend_from_slice(&(*at as u32).to_be_bytes());
+                }
+            }
+            b
+        }
+
+        /// What the track starts with on its own timeline, in the track's units: the media time
+        /// of the first picture shown, when that is shown, and how much is left out before it.
+        /// `edit` is where the file says playing begins; before it is the padding some encoders
+        /// put at the start. Only that shortens the track: pictures held back for display order
+        /// move the whole track along, and leaving that out of its length would cut off the end.
+        fn opening(&self, edit: u64) -> (u64, u64, u64) {
+            let lowest = i64::from(self.shifts.iter().copied().min().unwrap_or(0));
+            // The picture shown first isn't the one with the smallest shift, and it's among the
+            // first few stored: a decoder can't hold back more than that.
+            let mut decoded = 0i64;
+            let mut soonest = i64::MAX;
+            for (shift, duration) in self.shifts.iter().zip(&self.durations).take(64) {
+                soonest = soonest.min(decoded + i64::from(*shift));
+                decoded += i64::from(*duration);
+            }
+            let soonest = if soonest == i64::MAX { 0 } else { soonest };
+            let inside = (soonest - lowest).max(0) as u64;
+            let shown = (self.first.unwrap_or(0) as i64 + soonest).max(0) as u64;
+            let padding = edit.saturating_sub(shown);
+            (inside + padding, shown.saturating_sub(edit), padding)
+        }
+    }
+
+    /// Where a track's edit list says playing begins, and how long nothing is shown before that
+    /// in the movie's units.
+    fn edit_start(trak: &[u8]) -> (u64, u64) {
+        let Some(edts) = payload(trak, b"edts").map(|r| &trak[r]) else { return (0, 0) };
+        let Some(elst) = payload(edts, b"elst").map(|r| &edts[r]) else { return (0, 0) };
+        let wide = elst.first() == Some(&1);
+        let width = if wide { 20 } else { 12 };
+        let mut empty = 0u64;
+        for i in 0..be32(elst, 4).unwrap_or(0) as usize {
+            let at = 8 + i * width;
+            let (length, media) = if wide {
+                let read = |o: usize| elst.get(o..o + 8).and_then(|v| v.try_into().ok()).map(u64::from_be_bytes);
+                (read(at).unwrap_or(0), read(at + 8).unwrap_or(0) as i64)
+            } else {
+                (u64::from(be32(elst, at).unwrap_or(0)), i64::from(be32(elst, at + 4).unwrap_or(0) as i32))
+            };
+            if media >= 0 {
+                return (media as u64, empty);
+            }
+            empty += length;
+        }
+        (0, empty)
+    }
+
+    /// An edit list: nothing for `wait`, then from `media` on for `length`.
+    fn edit_list(wait: u64, media: u64, length: u64) -> Vec<u8> {
+        let mut rows: Vec<(u64, i64)> = vec![];
+        if wait > 0 {
+            rows.push((wait, -1));
+        }
+        rows.push((length, media as i64));
+        let wide = rows.iter().any(|(l, m)| *l > u64::from(u32::MAX) || *m > i64::from(i32::MAX));
+        let mut b = vec![u8::from(wide), 0, 0, 0];
+        b.extend_from_slice(&(rows.len() as u32).to_be_bytes());
+        for (length, media) in rows {
+            if wide {
+                b.extend_from_slice(&length.to_be_bytes());
+                b.extend_from_slice(&media.to_be_bytes());
+            } else {
+                b.extend_from_slice(&(length as u32).to_be_bytes());
+                b.extend_from_slice(&(media as i32).to_be_bytes());
+            }
+            b.extend_from_slice(&[0, 1, 0, 0]);
+        }
+        make_box(b"edts", &make_box(b"elst", &b))
+    }
+
+    /// Copy of `buf` with the first child `kind` rebuilt from its payload.
+    fn rewrite(buf: &[u8], kind: &[u8; 4], change: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+        let mut change = Some(change);
+        let mut out = vec![];
+        for (o, s, k) in children(buf) {
+            match change.take_if(|_| &k == kind) {
+                Some(f) => out.extend(make_box(kind, &f(&buf[o + header_len(buf, o)..o + s]))),
+                None => out.extend_from_slice(&buf[o..o + s]),
+            }
+        }
+        out
+    }
+
+    /// A full box's duration, at `v0` in version 0 boxes and `v1` in version 1.
+    fn set_duration(p: &mut [u8], v0: usize, v1: usize, value: u64) {
+        if p[0] == 1 {
+            p[v1..v1 + 8].copy_from_slice(&value.to_be_bytes());
+        } else {
+            set_u32(p, v0, value.min(u64::from(u32::MAX)) as u32);
+        }
+    }
+
+    fn text_tag(kind: [u8; 4], text: &str) -> Vec<u8> {
+        let data = [&[0, 0, 0, 1, 0, 0, 0, 0][..], text.as_bytes()].concat();
+        make_box(&kind, &make_box(b"data", &data))
+    }
+
+    /// The `udta` box with a title and artist, as music players read them.
+    fn tags_box(title: &str, artist: Option<&str>) -> Vec<u8> {
+        let mut list = text_tag([0xA9, b'n', b'a', b'm'], title);
+        if let Some(a) = artist {
+            list.extend(text_tag([0xA9, b'A', b'R', b'T'], a));
+        }
+        let handler = make_box(b"hdlr", &[&[0u8; 8][..], b"mdir", b"appl", &[0u8; 9]].concat());
+        let meta = make_box(b"meta", &[&[0u8; 4][..], &handler, &make_box(b"ilst", &list)].concat());
+        make_box(b"udta", &meta)
+    }
+
+    /// Rewrite a one-track fragmented MP4 as an ordinary one. A fragmented file keeps its length
+    /// spread over thousands of small pieces, which many players don't add up.
+    pub fn defragment(src: &Path, dest: &Path, title: &str, artist: Option<&str>) -> io::Result<bool> {
+        let mut f = File::open(src)?;
+        let m = load(&mut f)?;
+        let [trak] = m.traks.as_slice() else { return Ok(false) };
+        let mvex = payload(&m.moov, b"mvex").map(|r| m.moov[r].to_vec()).unwrap_or_default();
+        let trex = payload(&mvex, b"trex").map(|r| &mvex[r]).unwrap_or_default();
+        let defaults = trex_defaults(trex);
+        let mut samples = Samples::default();
+        for b in m.fragments.iter().filter(|b| &b.kind == b"moof") {
+            let moof = read_at(&mut f, b.start + b.header, b.size - b.header)?;
+            samples.read_moof(&moof, b.start, defaults).ok_or_else(|| bad("damaged fragment"))?;
+        }
+        let data: u64 = samples.runs.iter().map(|r| r.1).sum();
+        if samples.sizes.is_empty() || data >= u64::from(u32::MAX) - 8 {
+            return Ok(false);
+        }
+        let media_scale = u64::from(trak_timescale(trak).unwrap_or(1).max(1));
+        let media_length: u64 = samples.durations.iter().map(|d| u64::from(*d)).sum();
+        let mvhd = payload(&m.moov, b"mvhd").map(|r| m.moov[r].to_vec()).ok_or_else(|| bad("no mvhd box"))?;
+        let movie_scale = u64::from(be32(&mvhd, if mvhd[0] == 1 { 20 } else { 12 }).unwrap_or(1).max(1));
+        let movie_length = media_length * movie_scale / media_scale;
+
+        let ftyp = make_box(b"ftyp", &[&b"M4A "[..], &[0, 0, 0, 0], b"M4A ", b"isom", b"mp42"].concat());
+        let moov_with = |first: u64| {
+            // An edit list in a fragmented file usually covers nothing, which here would mean silence.
+            let trak: Vec<u8> = children(trak).into_iter().filter(|c| &c.2 != b"edts").flat_map(|(o, s, _)| trak[o..o + s].to_vec()).collect();
+            let trak = rewrite(&trak, b"tkhd", |p| {
+                let mut p = p.to_vec();
+                set_duration(&mut p, 20, 28, movie_length);
+                p
+            });
+            let trak = rewrite(&trak, b"mdia", |mdia| {
+                let mdia = rewrite(mdia, b"mdhd", |p| {
+                    let mut p = p.to_vec();
+                    set_duration(&mut p, 16, 24, media_length);
+                    p
+                });
+                rewrite(&mdia, b"minf", |minf| {
+                    rewrite(minf, b"stbl", |stbl| {
+                        let stsd = find(stbl, b"stsd").map_or(&[][..], |(o, s)| &stbl[o..o + s]);
+                        [stsd, &make_box(b"stts", &samples.stts()), &make_box(b"stsc", &samples.stsc()), &make_box(b"stsz", &samples.stsz()), &make_box(b"co64", &samples.co64(first))].concat()
+                    })
+                })
+            });
+            let mut mvhd = mvhd.clone();
+            set_duration(&mut mvhd, 16, 24, movie_length);
+            make_box(b"moov", &[make_box(b"mvhd", &mvhd), make_box(b"trak", &trak), tags_box(title, artist)].concat())
+        };
+        let header = ftyp.len() as u64 + moov_with(0).len() as u64 + 8;
+        let mut w = BufWriter::with_capacity(1 << 20, File::create(dest)?);
+        w.write_all(&ftyp)?;
+        w.write_all(&moov_with(header))?;
+        w.write_all(&((data + 8) as u32).to_be_bytes())?;
+        w.write_all(b"mdat")?;
+        for (offset, bytes, _) in &samples.runs {
+            copy_range(&mut f, *offset, *bytes, &mut w)?;
+        }
+        w.flush()?;
+        Ok(true)
+    }
+
+    /// What decides whether two fragmented headers can share a file: the first track's description
+    /// of its samples, and its clock. `None` if this isn't a fragmented header.
+    pub fn stream_identity(init: &[u8]) -> Option<Vec<u8>> {
+        let (o, s) = find(init, b"moov")?;
+        let moov = &init[o + header_len(init, o)..o + s];
+        find(moov, b"mvex")?;
+        let trak = &moov[payload(moov, b"trak")?];
+        let mdia = &trak[payload(trak, b"mdia")?];
+        let minf = &mdia[payload(mdia, b"minf")?];
+        let stbl = &minf[payload(minf, b"stbl")?];
+        let (o, s) = find(stbl, b"stsd")?;
+        Some([&stbl[o..o + s], &trak_timescale(trak)?.to_be_bytes()].concat())
+    }
+
+    /// The `tfdt` boxes of a fragment, as their place in its bytes.
+    fn time_boxes(moof: &[u8]) -> Vec<usize> {
+        let trafs = children(moof).into_iter().filter(|c| &c.2 == b"traf");
+        trafs.filter_map(|(o, s, _)| {
+            let start = o + header_len(moof, o);
+            payload(&moof[start..o + s], b"tfdt").map(|r| start + r.start)
+        }).collect()
+    }
+
+    /// Which part of a file a byte belongs to, given where each part starts.
+    fn part_of(starts: &[u64], at: u64) -> usize {
+        starts.partition_point(|s| *s <= at).saturating_sub(1)
+    }
+
+    /// The time, in seconds, of the first fragment of each part of a fragmented file.
+    pub fn first_times(path: &Path, starts: &[u64]) -> io::Result<Vec<Option<f64>>> {
+        let mut f = File::open(path)?;
+        let m = load(&mut f)?;
+        let scale = m.traks.first().and_then(|t| trak_timescale(t)).unwrap_or(1);
+        let mut out = vec![None; starts.len()];
+        for b in m.fragments.iter().filter(|b| &b.kind == b"moof") {
+            let part = part_of(starts, b.start);
+            if out[part].is_none() {
+                let moof = read_at(&mut f, b.start + b.header, b.size - b.header)?;
+                out[part] = Some(moof_time(&moof, scale));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Move each part of a fragmented file along its clock by so many seconds. The file stays the
+    /// same size: only the times in it change.
+    pub fn move_times(path: &Path, starts: &[u64], seconds: &[f64]) -> io::Result<()> {
+        let mut f = File::options().read(true).write(true).open(path)?;
+        let m = load(&mut f)?;
+        let scale = f64::from(m.traks.first().and_then(|t| trak_timescale(t)).unwrap_or(1));
+        for b in m.fragments.iter().filter(|b| &b.kind == b"moof") {
+            let by = (seconds[part_of(starts, b.start)] * scale).round() as i64;
+            let body = b.start + b.header;
+            let mut moof = read_at(&mut f, body, b.size - b.header)?;
+            for at in time_boxes(&moof) {
+                if moof[at] == 1 {
+                    let time = u64::from_be_bytes(moof[at + 4..at + 12].try_into().map_err(|_| bad("damaged fragment"))?);
+                    moof[at + 4..at + 12].copy_from_slice(&((time as i64 + by).max(0) as u64).to_be_bytes());
+                } else {
+                    let time = be32(&moof, at + 4).ok_or_else(|| bad("damaged fragment"))?;
+                    let moved = (i64::from(time) + by).clamp(0, i64::from(u32::MAX)) as u32;
+                    moof[at + 4..at + 8].copy_from_slice(&moved.to_be_bytes());
+                }
+            }
+            f.seek(SeekFrom::Start(body))?;
+            f.write_all(&moof)?;
+        }
+        Ok(())
+    }
+
+    fn trex_defaults(trex: &[u8]) -> Defaults {
+        Defaults { duration: be32(trex, 12).unwrap_or(0), size: be32(trex, 16).unwrap_or(0), flags: be32(trex, 20).unwrap_or(0) }
+    }
+
+    /// The `trex` box of each track.
+    fn all_defaults(moov: &[u8]) -> Vec<(u32, Defaults)> {
+        let Some(mvex) = payload(moov, b"mvex").map(|r| &moov[r]) else { return vec![] };
+        children(mvex).into_iter().filter(|c| &c.2 == b"trex").filter_map(|(o, s, _)| {
+            let trex = &mvex[o + header_len(mvex, o)..o + s];
+            Some((be32(trex, 4)?, trex_defaults(trex)))
+        }).collect()
+    }
+
+    /// A movie's clock for the header boxes: it only places tracks, so a millisecond will do, and
+    /// some fragmented files have one tick a second there.
+    const MOVIE_SCALE: u64 = 1000;
+
+    /// Rewrite a fragmented MP4 as an ordinary one with its index at the front: the media isn't
+    /// touched, it's moved together and listed in tables. Players that don't add up fragments then
+    /// show the length, and all of them can jump around at once. `Ok(false)` leaves it alone.
+    pub fn to_plain(src: &Path, dest: &Path, title: &str) -> io::Result<bool> {
+        let mut f = File::open(src)?;
+        let Ok(m) = load(&mut f) else { return Ok(false) };
+        let defaults = all_defaults(&m.moov);
+        let ids: Vec<u32> = m.traks.iter().filter_map(|t| trak_id(t)).collect();
+        if ids.len() != m.traks.len() {
+            return Ok(false);
+        }
+        let mut tracks: Vec<Samples> = m.traks.iter().map(|t| Samples { can_trim: handler(t) == Some(*b"soun"), ..Default::default() }).collect();
+        // Runs in file order: which track, and the run's number within that track.
+        let mut order: Vec<(usize, usize)> = vec![];
+        for b in m.fragments.iter().filter(|b| &b.kind == b"moof") {
+            let moof = read_at(&mut f, b.start + b.header, b.size - b.header)?;
+            let mut previous = b.start;
+            for (o, s, k) in children(&moof) {
+                if &k != b"traf" {
+                    continue;
+                }
+                let traf = &moof[o + header_len(&moof, o)..o + s];
+                let Some(index) = traf_track(traf).and_then(|id| ids.iter().position(|i| *i == id)) else { return Ok(false) };
+                let rule = defaults.iter().find(|(id, _)| *id == ids[index]).map(|d| d.1).unwrap_or_default();
+                let before = tracks[index].runs.len();
+                let Some(end) = tracks[index].read_traf(traf, b.start, previous, rule) else { return Ok(false) };
+                previous = end;
+                order.extend((before..tracks[index].runs.len()).map(|run| (index, run)));
+            }
+        }
+        if tracks.iter().all(|t| t.sizes.is_empty()) {
+            return Ok(false);
+        }
+        let data: u64 = order.iter().map(|(t, r)| tracks[*t].runs[*r].1).sum();
+        let wide = data >= u64::from(u32::MAX) - (1 << 26);
+        let mdat_header = if wide { 16 } else { 8 };
+
+        // When each track opens. The tracks keep their distance from each other: that's the sync.
+        let scale = |t: usize| u64::from(trak_timescale(&m.traks[t]).unwrap_or(1).max(1));
+        let openings: Vec<Option<(u64, u64, u64)>> = (0..tracks.len())
+            .map(|t| {
+                if tracks[t].sizes.is_empty() {
+                    return None;
+                }
+                let (edit, wait) = edit_start(&m.traks[t]);
+                let (media, shown, padding) = tracks[t].opening(edit);
+                Some((media, shown * MOVIE_SCALE / scale(t) + wait, padding))
+            })
+            .collect();
+        let earliest = openings.iter().flatten().map(|o| o.1).min().unwrap_or(0);
+
+        let moov_with = |first: u64| {
+            let mut at = first;
+            let mut places: Vec<Vec<u64>> = tracks.iter().map(|_| vec![]).collect();
+            for (t, r) in &order {
+                places[*t].push(at);
+                at += tracks[*t].runs[*r].1;
+            }
+            let mut longest = 0u64;
+            let mut traks = vec![];
+            for (index, samples) in tracks.iter().enumerate() {
+                let Some((media, shown, padding)) = openings[index] else { continue };
+                let media_length: u64 = samples.durations.iter().map(|d| u64::from(*d)).sum();
+                let wait = shown - earliest;
+                let playing = media_length.saturating_sub(padding) * MOVIE_SCALE / scale(index);
+                longest = longest.max(wait + playing);
+                let source = &m.traks[index];
+                let mut trak = vec![];
+                for (o, s, k) in children(source) {
+                    let body = &source[o + header_len(source, o)..o + s];
+                    match &k {
+                        b"tkhd" => {
+                            let mut p = body.to_vec();
+                            set_duration(&mut p, 20, 28, wait + playing);
+                            p[3] |= 1;
+                            trak.extend(make_box(b"tkhd", &p));
+                            if wait > 0 || media > 0 {
+                                trak.extend(edit_list(wait, media, playing));
+                            }
+                        }
+                        b"edts" => {}
+                        b"mdia" => {
+                            let mdia = rewrite(body, b"mdhd", |p| {
+                                let mut p = p.to_vec();
+                                set_duration(&mut p, 16, 24, media_length);
+                                p
+                            });
+                            let mdia = rewrite(&mdia, b"minf", |minf| {
+                                rewrite(minf, b"stbl", |stbl| {
+                                    let mut out = find(stbl, b"stsd").map_or(vec![], |(o, s)| stbl[o..o + s].to_vec());
+                                    out.extend(make_box(b"stts", &samples.stts()));
+                                    if let Some(table) = samples.ctts() {
+                                        out.extend(make_box(b"ctts", &table));
+                                    }
+                                    if let Some(table) = samples.stss() {
+                                        out.extend(make_box(b"stss", &table));
+                                    }
+                                    out.extend(make_box(b"stsc", &samples.stsc()));
+                                    out.extend(make_box(b"stsz", &samples.stsz()));
+                                    out.extend(make_box(if wide { b"co64" } else { b"stco" }, &Samples::chunk_table(&places[index], wide)));
+                                    out
+                                })
+                            });
+                            trak.extend(make_box(b"mdia", &mdia));
+                        }
+                        _ => trak.extend_from_slice(&source[o..o + s]),
+                    }
+                }
+                traks.extend(make_box(b"trak", &trak));
+            }
+            let mut mvhd = payload(&m.moov, b"mvhd").map(|r| m.moov[r].to_vec()).unwrap_or_default();
+            let clock_at = if mvhd[0] == 1 { 20 } else { 12 };
+            set_u32(&mut mvhd, clock_at, MOVIE_SCALE as u32);
+            set_duration(&mut mvhd, 16, 24, longest);
+            make_box(b"moov", &[make_box(b"mvhd", &mvhd), traks, tags_box(title, None)].concat())
+        };
+        if payload(&m.moov, b"mvhd").is_none() {
+            return Ok(false);
+        }
+
+        let ftyp = make_box(b"ftyp", &[&b"isom"[..], &[0, 0, 2, 0], b"isom", b"iso2", b"mp41"].concat());
+        let header = ftyp.len() as u64 + moov_with(0).len() as u64 + mdat_header;
+        let mut w = BufWriter::with_capacity(1 << 20, File::create(dest)?);
+        w.write_all(&ftyp)?;
+        w.write_all(&moov_with(header))?;
+        if wide {
+            w.write_all(&1u32.to_be_bytes())?;
+            w.write_all(b"mdat")?;
+            w.write_all(&(data + 16).to_be_bytes())?;
+        } else {
+            w.write_all(&((data + 8) as u32).to_be_bytes())?;
+            w.write_all(b"mdat")?;
+        }
+        for (t, r) in &order {
+            let (offset, bytes, _) = tracks[*t].runs[*r];
+            copy_range(&mut f, offset, bytes, &mut w)?;
+        }
+        w.flush()?;
+        Ok(true)
+    }
+
+    /// The last step for a video stream: an ordinary MP4 in place of a fragmented one. Any
+    /// trouble, a full disk included, leaves the file that was already good.
+    pub fn finish_video(path: std::path::PathBuf, title: &str) -> std::path::PathBuf {
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")) {
+            return path;
+        }
+        let work = path.with_extension("mp4.part");
+        if !matches!(to_plain(&path, &work, title), Ok(true)) {
+            let _ = std::fs::remove_file(&work);
+            return path;
+        }
+        if std::fs::rename(&work, &path).is_err() {
+            let replaced = std::fs::copy(&work, &path).is_ok();
+            let _ = std::fs::remove_file(&work);
+            debug_assert!(replaced);
+        }
+        path
+    }
+
+    /// The last step for a stream: audio on its own becomes an ordinary `.m4a` with its length
+    /// and title. Anything else, and any trouble, leaves the file as it is.
+    pub fn finish_audio(path: std::path::PathBuf, stem: &str) -> std::path::PathBuf {
+        if !is_audio_only(&path) {
+            return path;
+        }
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let (artist, title) = stem.split_once(" - ").map_or((None, stem), |(a, t)| (Some(a), t));
+        let work = path.with_extension("m4a.part");
+        let done = defragment(&path, &work, title, artist).unwrap_or(false);
+        let from = if done { work.clone() } else { path.clone() };
+        if done {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            let _ = std::fs::remove_file(&work);
+        }
+        let dest = crate::naming::unique_path(&dir, &format!("{stem}.m4a"));
+        if std::fs::rename(&from, &dest).is_ok() { dest } else { from }
+    }
+
+    #[cfg(test)]
+    mod overlap {
+        use super::*;
+
+        #[test]
+        fn sound_that_overlaps_the_part_before_is_left_out() {
+            // Two fragments of four samples of 100, the second starting 200 before the first ended.
+            let moof = |time: u64, offset: u32, sizes: [u32; 4]| {
+                let tfhd = make_box(b"tfhd", &[&[0, 2, 0, 0x08][..], &1u32.to_be_bytes(), &100u32.to_be_bytes()].concat());
+                let tfdt = make_box(b"tfdt", &[&[1, 0, 0, 0][..], &time.to_be_bytes()].concat());
+                let mut trun = vec![0, 0, 2, 1];
+                trun.extend_from_slice(&4u32.to_be_bytes());
+                trun.extend_from_slice(&offset.to_be_bytes());
+                sizes.iter().for_each(|s| trun.extend_from_slice(&s.to_be_bytes()));
+                [tfhd, tfdt, make_box(b"trun", &trun)].concat()
+            };
+            let mut samples = Samples { can_trim: true, ..Default::default() };
+            samples.read_traf(&moof(0, 8, [1, 1, 1, 1]), 1000, 1000, Defaults::default()).unwrap();
+            samples.read_traf(&moof(200, 8, [10, 20, 30, 40]), 2000, 2000, Defaults::default()).unwrap();
+            assert_eq!(samples.sizes, [1, 1, 1, 1, 30, 40]);
+            assert_eq!(samples.durations.iter().sum::<u32>(), 600);
+            // The kept run starts after the two samples left out.
+            assert_eq!(samples.runs[1], (2000 + 8 + 30, 70, 2));
+        }
     }
 }
 
@@ -600,6 +1339,137 @@ mod tests {
         let mut p = vec![0, 0, 0, 0];
         p.extend_from_slice(body);
         bx(kind, &p)
+    }
+
+    /// A fragmented audio file: two fragments of two samples each, with sizes in the `trun`.
+    fn audio_fmp4() -> Vec<u8> {
+        let mut tkhd = vec![0u8; 8];
+        tkhd.extend_from_slice(&1u32.to_be_bytes());
+        tkhd.extend_from_slice(&[0u8; 68]);
+        let mut mdhd = vec![0u8; 8];
+        mdhd.extend_from_slice(&1000u32.to_be_bytes());
+        mdhd.extend_from_slice(&[0u8; 8]);
+        let hdlr = full(b"hdlr", &[&[0u8; 4][..], b"soun", &[0u8; 13]].concat());
+        let stbl = bx(b"stbl", &[full(b"stsd", &[0, 0, 0, 0]), full(b"stts", &[0, 0, 0, 0])].concat());
+        let mdia = bx(b"mdia", &[full(b"mdhd", &mdhd), hdlr, bx(b"minf", &stbl)].concat());
+        let edts = bx(b"edts", &full(b"elst", &[0u8; 4]));
+        let trak = bx(b"trak", &[full(b"tkhd", &tkhd), edts, mdia].concat());
+        let mut trex = 1u32.to_be_bytes().to_vec();
+        trex.extend_from_slice(&[0, 0, 0, 1]);
+        trex.extend_from_slice(&100u32.to_be_bytes()); // default duration
+        trex.extend_from_slice(&[0u8; 8]);
+        let mut mvhd = vec![0u8; 8];
+        mvhd.extend_from_slice(&1000u32.to_be_bytes());
+        mvhd.extend_from_slice(&[0u8; 84]);
+        let moov = bx(b"moov", &[full(b"mvhd", &mvhd), trak, bx(b"mvex", &full(b"trex", &trex))].concat());
+        let mut out = [bx(b"ftyp", b"iso6\0\0\0\0"), moov].concat();
+        for (i, bytes) in [[10u8, 20], [30, 40]].iter().enumerate() {
+            let mdat = [vec![bytes[0]; 3], vec![bytes[1]; 5]].concat();
+            let moof_of = |offset: u32| {
+                let tfhd = bx(b"tfhd", &[&[0, 2, 0, 0][..], &1u32.to_be_bytes()].concat());
+                let mut trun = vec![0, 0, 2, 1]; // data offset and sample sizes
+                trun.extend_from_slice(&2u32.to_be_bytes());
+                trun.extend_from_slice(&offset.to_be_bytes());
+                trun.extend_from_slice(&3u32.to_be_bytes());
+                trun.extend_from_slice(&5u32.to_be_bytes());
+                let traf = bx(b"traf", &[tfhd, bx(b"trun", &trun)].concat());
+                bx(b"moof", &[full(b"mfhd", &(i as u32 + 1).to_be_bytes()), traf].concat())
+            };
+            let offset = moof_of(0).len() as u32 + 8;
+            out.extend(moof_of(offset));
+            out.extend(bx(b"mdat", &mdat));
+        }
+        out
+    }
+
+    #[test]
+    fn audio_fragments_become_an_ordinary_file_with_a_length_and_tags() {
+        let dir = std::env::temp_dir().join(format!("rdm-defrag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (src, out) = (dir.join("in.mp4"), dir.join("out.m4a"));
+        std::fs::write(&src, audio_fmp4()).unwrap();
+        assert!(mp4::is_audio_only(&src));
+        assert!(mp4::defragment(&src, &out, "Song", Some("Artist")).unwrap());
+        let b = std::fs::read(&out).unwrap();
+        let top = mp4::children(&b);
+        assert_eq!(top.iter().map(|c| c.2).collect::<Vec<_>>(), [*b"ftyp", *b"moov", *b"mdat"]);
+        // The samples, in order, with nothing else.
+        let (o, s, _) = top[2];
+        assert_eq!(&b[o + 8..o + s], [vec![10; 3], vec![20; 5], vec![30; 3], vec![40; 5]].concat());
+        let moov = &b[top[1].0 + 8..top[1].0 + top[1].1];
+        let box_of = |buf: &[u8], k: &[u8; 4]| mp4::children(buf).into_iter().find(|c| &c.2 == k).map(|(o, s, _)| buf[o + 8..o + s].to_vec()).unwrap();
+        // Four samples of 100 at 1000 per second: 0.4 s, in the movie and the track.
+        assert_eq!(u32::from_be_bytes(box_of(moov, b"mvhd")[16..20].try_into().unwrap()), 400);
+        let trak = box_of(moov, b"trak");
+        assert_eq!(u32::from_be_bytes(box_of(&trak, b"tkhd")[20..24].try_into().unwrap()), 400);
+        let stbl = box_of(&box_of(&box_of(&trak, b"mdia"), b"minf"), b"stbl");
+        assert_eq!(box_of(&stbl, b"stts")[8..], [0, 0, 0, 4, 0, 0, 0, 100]);
+        let co64 = box_of(&stbl, b"co64");
+        assert_eq!(u64::from_be_bytes(co64[8..16].try_into().unwrap()), o as u64 + 8);
+        // No fragments left, and the tags are there.
+        assert!(mp4::children(moov).iter().all(|c| &c.2 != b"mvex"));
+        assert!(mp4::children(&trak).iter().all(|c| &c.2 != b"edts"));
+        assert!(b.windows(4).any(|w| w == b"Song") && b.windows(6).any(|w| w == b"Artist"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fragments_become_an_ordinary_file_with_the_samples_in_place() {
+        let dir = std::env::temp_dir().join(format!("rdm-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (src, out) = (dir.join("in.mp4"), dir.join("out.mp4"));
+        std::fs::write(&src, audio_fmp4()).unwrap();
+        assert!(mp4::to_plain(&src, &out, "Clip").unwrap());
+        let b = std::fs::read(&out).unwrap();
+        let top = mp4::children(&b);
+        assert_eq!(top.iter().map(|c| c.2).collect::<Vec<_>>(), [*b"ftyp", *b"moov", *b"mdat"]);
+        let (o, s, _) = top[2];
+        assert_eq!(&b[o + 8..o + s], [vec![10; 3], vec![20; 5], vec![30; 3], vec![40; 5]].concat());
+        let moov = &b[top[1].0 + 8..top[1].0 + top[1].1];
+        let box_of = |buf: &[u8], k: &[u8; 4]| mp4::children(buf).into_iter().find(|c| &c.2 == k).map(|(o, s, _)| buf[o + 8..o + s].to_vec()).unwrap();
+        assert!(mp4::children(moov).iter().all(|c| &c.2 != b"mvex"));
+        assert_eq!(u32::from_be_bytes(box_of(moov, b"mvhd")[16..20].try_into().unwrap()), 400);
+        let trak = box_of(moov, b"trak");
+        let stbl = box_of(&box_of(&box_of(&trak, b"mdia"), b"minf"), b"stbl");
+        assert_eq!(box_of(&stbl, b"stts")[8..], [0, 0, 0, 4, 0, 0, 0, 100]);
+        // The table points at the first sample, and at the second fragment's after it.
+        let stco = box_of(&stbl, b"stco");
+        let first = u32::from_be_bytes(stco[8..12].try_into().unwrap()) as usize;
+        assert_eq!(first, o + 8);
+        assert_eq!(u32::from_be_bytes(stco[12..16].try_into().unwrap()) as usize, first + 8);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parts_of_a_file_move_along_their_clock() {
+        let dir = std::env::temp_dir().join(format!("rdm-times-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("in.mp4");
+        // Three fragments of one second each, the last of them a new part starting over at 0.
+        let mut file = fmp4(1, 1000, 3, 1);
+        let at = mp4::children(&file).iter().filter(|c| &c.2 == b"moof").map(|c| c.0 as u64).collect::<Vec<_>>();
+        let last = at[2] as usize;
+        let tfdt = last + file[last..].windows(4).position(|w| w == b"tfdt").unwrap() + 4;
+        file[tfdt + 4..tfdt + 12].copy_from_slice(&0u64.to_be_bytes());
+        let size = file.len();
+        std::fs::write(&path, file).unwrap();
+        let parts = [0, at[2]];
+        let times = |p: &std::path::Path| mp4::first_times(p, &parts).unwrap();
+        assert_eq!(times(&path), [Some(0.0), Some(0.0)]);
+        mp4::move_times(&path, &parts, &[0.0, 2.0]).unwrap();
+        assert_eq!(times(&path), [Some(0.0), Some(2.0)]);
+        assert_eq!(std::fs::read(&path).unwrap().len(), size);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_that_is_not_fragmented_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("rdm-plain-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (src, out) = (dir.join("in.mp4"), dir.join("out.mp4"));
+        std::fs::write(&src, bx(b"moov", &full(b"mvhd", &[0u8; 96]))).unwrap();
+        assert!(!mp4::to_plain(&src, &out, "Clip").unwrap());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A tiny fragmented MP4 with one track and `n` fragments.

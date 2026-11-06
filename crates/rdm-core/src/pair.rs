@@ -138,6 +138,7 @@ pub async fn run(
     };
     let dest = naming::unique_path(&req.dir, &format!("{stem}.{out_ext}"));
     let result = crate::join::video_and_audio(vpath, apath, dest, &stem, progress).await?;
+    let result = crate::join::finish(result, stem.clone(), progress).await?;
     let size = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
     progress.send_modify(|p| {
         p.file_name = result.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

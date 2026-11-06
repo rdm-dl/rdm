@@ -39,6 +39,14 @@ pub struct EngineConfig {
     pub proxy: Option<String>,
     pub proxy_user: Option<String>,
     pub proxy_pass: Option<String>,
+    /// Leave ad breaks stitched into a stream in the saved file.
+    pub keep_ads: bool,
+    /// Save a stream's subtitles next to the video.
+    pub save_subtitles: bool,
+    /// Which ones, like `en, es`. Empty takes them all.
+    pub subtitle_languages: String,
+    /// End a live recording after this many seconds.
+    pub record_for: Option<u64>,
 }
 
 impl Default for EngineConfig {
@@ -58,6 +66,10 @@ impl Default for EngineConfig {
             limiter_max_pause: Duration::from_secs(12),
             timeout: Duration::from_secs(30),
             max_retries: 20,
+            keep_ads: false,
+            save_subtitles: false,
+            subtitle_languages: "en".into(),
+            record_for: None,
             user_agent: format!("Mozilla/5.0 (compatible; RDM/{})", env!("CARGO_PKG_VERSION")),
             proxy: None,
             proxy_user: None,

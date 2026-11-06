@@ -184,6 +184,32 @@ pub fn set_autostart(enable: bool) {
     }
 }
 
+/// Linux: put RDM in the desktop's application menu, pointing at this copy of the program.
+/// A portable archive has no installer to do this. Skipped for a development build.
+#[cfg(target_os = "linux")]
+pub fn install_menu_entry() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(data) = dirs::data_dir() else { return };
+    if exe.components().any(|c| c.as_os_str() == "target") {
+        return;
+    }
+    let icon = data.join("icons/hicolor/256x256/apps/rdm.png");
+    if icon.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) {
+        let _ = std::fs::write(&icon, include_bytes!("../../../assets/icon256.png"));
+    }
+    let apps = data.join("applications");
+    let _ = std::fs::create_dir_all(&apps);
+    let _ = std::fs::write(apps.join("rdm.desktop"), menu_entry(&exe.display().to_string()));
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn menu_entry(exe: &str) -> String {
+    let quoted = exe.replace('\\', "\\\\\\\\").replace('"', "\\\\\"").replace('`', "\\\\`").replace('$', "\\\\$").replace('%', "%%");
+    format!(
+        "[Desktop Entry]\nType=Application\nName=RDM\nGenericName=Download Manager\nComment=Fast downloads with resume, video capture and a scheduler\nExec=\"{quoted}\"\nIcon=rdm\nTerminal=false\nCategories=Network;FileTransfer;\nStartupWMClass=rdm\n"
+    )
+}
+
 /// Does the text look like a downloadable link we capture?
 pub fn clipboard_link(text: &str, exts: &[String]) -> Option<String> {
     let t = text.trim();
@@ -201,6 +227,12 @@ pub fn clipboard_link(text: &str, exts: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_entry_quotes_the_path() {
+        assert!(menu_entry("/opt/my apps/rdm-gui").contains("Exec=\"/opt/my apps/rdm-gui\"\n"));
+        assert!(menu_entry("/home/a$b/100%/rdm").contains(r#"Exec="/home/a\\$b/100%%/rdm""#));
+    }
 
     #[test]
     fn formats() {

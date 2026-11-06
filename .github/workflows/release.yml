@@ -46,13 +46,20 @@ jobs:
         run: cargo build --workspace --release --target ${{ matrix.target }}
       - name: Package
         run: python tools/package.py --target ${{ matrix.target }} --name ${{ matrix.name }}
+      - name: Setup program
+        if: runner.os == 'Windows'
+        run: |
+          choco install innosetup --no-progress -y
+          python tools/installer.py --name ${{ matrix.name }}
       - uses: actions/upload-artifact@v4
         with:
           name: RDM-${{ matrix.name }}
           path: |
+            dist/*-setup.exe
             dist/*.zip
             dist/*.tar.gz
             dist/*.dmg
+            dist/*.sha256
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

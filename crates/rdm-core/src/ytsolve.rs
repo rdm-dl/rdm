@@ -127,12 +127,12 @@ fn literal_calls(src: &str) -> Vec<Call> {
 fn n_function(src: &str, table: &(String, Vec<String>)) -> Option<(String, Vec<i64>)> {
     let t = regex::escape(&table.0);
     // catch(e){h = TABLE[v^K] + a; break ...}
-    let marker = Regex::new(&format!(r"catch\(([\w$]+)\)\{{([\w$]+)={t}\[([\w$]+)\^(\d+)\]\+([\w$]+);break")).ok()?;
+    let marker = Regex::new(&format!(r"catch\(([\w$]+)\)\{{\s*([\w$]+)\s*=\s*{t}\[([\w$]+)\^(\d+)\]\s*\+\s*([\w$]+);\s*break")).ok()?;
     let m = marker.captures(src)?;
     let pos = m.get(0)?.start();
     let k_marker: i64 = m[4].parse().ok()?;
     // Enclosing function: the last `name=function(a,b,…){var v=b^a;` before the marker.
-    let head = Regex::new(r"([A-Za-z_$][\w$]*)=function\(([\w$]+),([\w$]+)[^)]*\)\{var ([\w$]+)=([\w$]+)\^([\w$]+);").ok()?;
+    let head = Regex::new(r"([A-Za-z_$][\w$]*)=function\(([\w$]+),([\w$]+)[^)]*\)\{var ([\w$]+)=([\w$]+)\^([\w$]+)[;,]").ok()?;
     let start = pos.saturating_sub(200_000);
     let func = head.captures_iter(&src[start..pos]).last()?;
     let name = func[1].to_string();

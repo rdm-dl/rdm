@@ -35,6 +35,19 @@ fn main() -> eframe::Result<()> {
         }
     }));
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Setup runs these with no window, then goes on.
+    if args.iter().any(|a| a == "--after-install") {
+        let _ = bridge::register();
+        if rdm_core::Settings::load(&data_dir().join("settings.json")).start_with_system {
+            util::set_autostart(true);
+        }
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--before-uninstall") {
+        bridge::unregister();
+        util::set_autostart(false);
+        return Ok(());
+    }
     let minimized = args.iter().any(|a| a == "--minimized");
     let urls: Vec<String> = args.iter().filter(|a| a.contains("://")).cloned().collect();
     let dir = data_dir();
@@ -122,10 +135,24 @@ fn main() -> eframe::Result<()> {
             .with_title(window::MAIN_TITLE)
             .with_inner_size([1100.0, 640.0])
             .with_min_inner_size([640.0, 420.0])
+            .with_app_id("rdm")
             .with_visible(!minimized)
             .with_icon(window::app_icon()),
+        // Wayland doesn't let an app hide or restore its window, or place its dialogs, so use
+        // X11 (XWayland) wherever it's there. Pure Wayland sessions still work.
+        #[cfg(target_os = "linux")]
+        event_loop_builder: tray::x11_available().then(|| -> eframe::EventLoopBuilderHook {
+            Box::new(|b| {
+                use winit::platform::x11::EventLoopBuilderExtX11;
+                b.with_x11();
+            })
+        }),
+        // Size and position, kept with RDM's other data.
+        persistence_path: Some(dir.join("window.ron")),
         ..Default::default()
     };
+    #[cfg(target_os = "linux")]
+    util::install_menu_entry();
     let handle = rt.handle().clone();
     let m2 = manager.clone();
     let result = eframe::run_native(

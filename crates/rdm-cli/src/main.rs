@@ -56,6 +56,15 @@ struct Opts {
     /// Proxy URL (http://, https://, socks5://) or "none".
     #[arg(long)]
     proxy: Option<String>,
+    /// Save a stream's subtitles too: languages like "en,es", or "all".
+    #[arg(long)]
+    subtitles: Option<String>,
+    /// Keep ad breaks stitched into a stream.
+    #[arg(long)]
+    keep_ads: bool,
+    /// End a live recording after this many seconds (Ctrl+C ends it at any time).
+    #[arg(long = "for")]
+    record_for: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -75,6 +84,12 @@ enum Cmd {
         #[command(flatten)]
         opts: Opts,
     },
+    /// List every episode of a show's page.
+    Episodes { url: String },
+    /// Close the running app, and wait until it's gone.
+    Quit,
+    /// Compare a file with a checksum (MD5, SHA-1, SHA-256 or SHA-512).
+    Check { file: PathBuf, checksum: String },
     /// List downloads in the running app.
     List,
     /// Bring the RDM window to the front.
@@ -102,6 +117,7 @@ fn build_request(url: String, o: &Opts, settings: &Settings) -> Result<DownloadR
         headers.push((k.trim().to_string(), v.trim().to_string()));
     }
     Ok(DownloadRequest {
+        subfolder: None,
         url,
         dir: o.dir.clone().unwrap_or_else(|| settings.download_dir.clone()),
         file_name: o.file.clone(),
@@ -129,6 +145,12 @@ async fn get(url: String, o: Opts) -> Result<()> {
     } else if !settings.proxy.mode.is_empty() {
         cfg.proxy = Some(settings.proxy.mode.clone());
     }
+    if let Some(languages) = &o.subtitles {
+        cfg.save_subtitles = true;
+        cfg.subtitle_languages = if languages == "all" { String::new() } else { languages.clone() };
+    }
+    cfg.keep_ads |= o.keep_ads;
+    cfg.record_for = o.record_for;
     let dl = Download::start(req, cfg, temp, Arc::new(Limiter::new(settings.speed_limit)));
     let handle = dl.handle();
     let mut progress = dl.progress.clone();
@@ -230,6 +252,43 @@ async fn main() -> Result<()> {
         }
         Cmd::Show => {
             client().await?.call(Request::Show).await?;
+            Ok(())
+        }
+        Cmd::Quit => {
+            // Nothing running is what was asked for, so it's no error.
+            if let Ok(mut c) = client().await {
+                let _ = c.call(Request::Quit).await;
+                for _ in 0..100 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    match client().await {
+                        Ok(c) => {
+                            let mut c = c;
+                            if c.call(Request::Ping).await.is_err() {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            Ok(())
+        }
+        Cmd::Check { file, checksum } => {
+            let read = std::sync::atomic::AtomicU64::new(0);
+            let outcome = rdm_core::checksum::check(&file, &checksum, &read).map_err(anyhow::Error::msg)?;
+            println!("{} {}", outcome.kind, outcome.actual);
+            if !outcome.matches {
+                bail!("the file does NOT match this checksum");
+            }
+            println!("the file matches");
+            Ok(())
+        }
+        Cmd::Episodes { url } => {
+            let list = rdm_core::sites::episodes(&url, None, &Default::default()).await?;
+            for e in &list {
+                println!("{} | {} | {}", e.folder().display(), e.file_name(), e.url);
+            }
+            println!("{} episodes", list.len());
             Ok(())
         }
         Cmd::Daemon => daemon().await,

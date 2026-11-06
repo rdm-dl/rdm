@@ -37,6 +37,50 @@ function button(text, onClick) {
   return b;
 }
 
+// Whole shows on sites where the extension plays the episodes itself.
+function showSection(show, pageUrl) {
+  if (!show || (!show.page && !show.running)) return;
+  const box = document.getElementById("show");
+  const text = document.getElementById("showText");
+  const pick = document.getElementById("showSeason");
+  const go = document.getElementById("showGo");
+  box.hidden = false;
+  if (show.running) {
+    text.textContent = `Getting ${show.at + 1} of ${show.total}. Tabs will open and close; leave them be.`;
+    go.textContent = "Stop";
+    go.onclick = async () => {
+      await api.runtime.sendMessage({ type: "show-stop" });
+      window.close();
+    };
+    return;
+  }
+  if (show.total) {
+    const missed = show.failed.length ? ` ${show.failed.length} couldn't be read: ${show.failed.slice(0, 3).join(", ")}${show.failed.length > 3 ? "…" : ""}` : "";
+    text.textContent = `Sent ${show.saved} of ${show.total} to RDM.${missed}`;
+  }
+  go.onclick = async () => {
+    go.disabled = true;
+    go.textContent = "Reading the list…";
+    const reply = await api.runtime.sendMessage({ type: "show-list", url: pageUrl });
+    go.disabled = false;
+    if (reply.error || !reply.list?.length) {
+      text.textContent = reply.error || "Nothing to get on this page.";
+      go.textContent = "Try again";
+      return;
+    }
+    const seasons = [...new Set(reply.list.map((e) => e.folder))];
+    pick.replaceChildren(new Option(`All ${reply.list.length}`, ""), ...seasons.map((s) => new Option(s.split("/").pop(), s)));
+    pick.hidden = false;
+    text.textContent = "Pick what to get. Tabs will open and close, one for each.";
+    go.textContent = "Start";
+    go.onclick = async () => {
+      const list = reply.list.filter((e) => !pick.value || e.folder === pick.value);
+      await api.runtime.sendMessage({ type: "show-start", list });
+      window.close();
+    };
+  };
+}
+
 async function init() {
   // popup.html?tab=<id> shows another tab's media (used when the popup is opened as a page).
   const forced = +new URLSearchParams(location.search).get("tab");
@@ -75,6 +119,7 @@ async function init() {
   };
   renderBlocked(state.blocked_hosts || []);
 
+  showSection(state.show, tab?.url);
   const list = document.getElementById("media");
   document.getElementById("empty").hidden = state.media.length > 0;
   for (const m of state.media) {

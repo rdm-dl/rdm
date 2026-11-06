@@ -32,6 +32,7 @@ pub struct ExtensionHelp {
     message: Option<String>,
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn find(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|p| p.exists()).cloned()
 }

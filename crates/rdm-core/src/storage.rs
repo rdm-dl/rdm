@@ -147,6 +147,9 @@ pub fn assemble(tmp: &TempDir, map: &ChunkMap, total: u64, dest: &Path, block: u
             out.write_all(&buf[..n])?;
             left -= n as u64;
         }
+        // Copied: give the room back, so a big file needs far less than twice its size.
+        drop(f);
+        let _ = fs::remove_file(tmp.chunk_path(map.chunks[i].id));
     }
     out.sync_all()?;
     let len = out.metadata()?.len();

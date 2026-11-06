@@ -64,6 +64,31 @@ impl OnQueueDone {
     }
 }
 
+/// The order of the download list.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ListOrder {
+    #[default]
+    Newest,
+    Oldest,
+    Name,
+    Size,
+    Status,
+}
+
+impl ListOrder {
+    pub const ALL: [Self; 5] = [Self::Newest, Self::Oldest, Self::Name, Self::Size, Self::Status];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Newest => "Newest first",
+            Self::Oldest => "Oldest first",
+            Self::Name => "Name",
+            Self::Size => "Largest first",
+            Self::Status => "Status",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Schedule {
     pub enabled: bool,
@@ -200,7 +225,10 @@ pub struct Settings {
     /// Ask before starting downloads captured from the browser.
     pub confirm_captured: bool,
     pub start_with_system: bool,
+    /// The close button hides RDM in the tray. (Named before the option below existed.)
     pub minimize_to_tray: bool,
+    /// The minimize button hides RDM in the tray too.
+    pub minimize_button_to_tray: bool,
     pub monitor_clipboard: bool,
     /// Antivirus command run after completion; `{file}` is replaced by the path.
     pub virus_scan_command: Option<String>,
@@ -208,6 +236,7 @@ pub struct Settings {
     pub dark_mode: bool,
     /// Look for a new version of RDM now and then.
     pub check_updates: bool,
+    pub list_order: ListOrder,
 }
 
 impl Default for Settings {
@@ -229,11 +258,13 @@ impl Default for Settings {
             confirm_captured: true,
             start_with_system: false,
             minimize_to_tray: true,
+            minimize_button_to_tray: false,
             monitor_clipboard: false,
             virus_scan_command: None,
             language: "en".into(),
             dark_mode: true,
             check_updates: true,
+            list_order: ListOrder::Newest,
         }
     }
 }

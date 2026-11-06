@@ -33,15 +33,22 @@
 - Starts with 4 connections and doubles while every connection is receiving data. Adapts to servers that limit parallel connections.
 - **Pause and resume at any time**, even after a crash or reboot (progress is saved every 2.5 s).
 - Overlap checks between parts; falls back to a single connection if a server returns inconsistent data.
+- Warns before starting if a file won't fit on the disk, and stops cleanly if the disk fills up, so you can free up space and resume.
 - HTTP, HTTPS and FTP; HTTP/SOCKS5 and system proxies; Basic authentication; saved logins per site; cookies and referrers from the browser.
 - Smart file naming (Content-Disposition with UTF-8 names, `?file=` parameters). Never overwrites silently, and strips invisible characters that could disguise a file's real extension.
 - The window stays responsive at all times: joining parts and merging audio/video run in the background with a progress bar.
 
 ### Video and streams
-- **HLS** (`.m3u8`, including AES-128) and **MPEG-DASH** (`.mpd`): pick the quality, separate audio tracks included.
-- **Built-in muxer**: video and audio are joined into one MP4 or WebM without ffmpeg (ffmpeg is used as a fallback for other combinations when it is installed).
+- **HLS** (`.m3u8`, including AES-128) and **MPEG-DASH** (`.mpd`): pick the quality, separate audio tracks included, also on sites that load video and audio as two playlists. The headers the player sends (Referer, Origin, access tokens) go along with every request.
+- **Built-in muxer**: video and audio are joined into one MP4 or WebM without ffmpeg, from fragmented MP4, MPEG-TS (H.264, H.265) and raw AAC or MP3, with nothing re-encoded. ffmpeg is used as a fallback for other formats when it is installed. DRM-protected streams can't be saved.
 - **YouTube**: all qualities up to 4K/8K and 60 fps, video and audio merged into one file. Signatures are handled by an embedded JavaScript engine; no external tools are needed.
-- Subtitles (VTT/SRT) are listed next to the video.
+- Subtitles (VTT/SRT) are listed next to the video. Turn on **Save subtitles** in Options, Video sites, to save the ones a stream offers beside the file, in the languages you choose.
+- **Live HLS streams** are recorded as they play. Press Stop and save, or wait for the stream to end, and they're put together like any other download. `rdm get <url> --for 600` ends a recording after ten minutes.
+- Streams finish as ordinary MP4 files, so every player shows the length and can jump around. Ad breaks stitched into a stream are left out unless **Keep ads** is on, and a DASH show split up by ad breaks is joined back into one file.
+
+### Checking
+
+- Compare a finished file with the checksum its site publishes: right-click it and choose **Check file**, or run `rdm check <file> <checksum>`. MD5, SHA-1, SHA-256 and SHA-512 are told apart on their own.
 
 ### Organisation
 - Categories (Compressed, Documents, Music, Programs, Video), each with its own folder.
@@ -50,11 +57,12 @@
 - Global and per-download speed limits, plus download quotas ("at most X MB every N hours").
 - **Site grabber**: crawl a website and collect images, videos, audio, documents, archives or your own file types, or save a complete **offline copy** with links rewritten for local browsing.
 - Batch downloads from URL patterns (`file*.jpg`, 1–100, a–z) or from the clipboard; import and export lists.
+- Sort the list by date, name, size or status; rename downloads; press Ctrl+V to add a copied link, or drop a text file of links on the window.
 - Clipboard monitoring, optional antivirus scan after completion, completion notifications.
 
 ### Integration
 - Browser extension for **Chrome, Edge, Brave, Vivaldi, Opera and Firefox**.
-- System tray icon, close to tray, start with the system, dark and light themes.
+- System tray icon, close or minimize to tray (your choice), start with the system, dark and light themes. On Linux the icon shows in Cinnamon, KDE, XFCE, MATE and other panels with StatusNotifier support; GNOME needs the AppIndicator extension. Without a tray, closing the window quits RDM.
 - **Updates itself**: RDM tells you when a new version is out, downloads it and swaps it in; one click restarts into the new version (on macOS it opens the new disk image).
 - `rdm` command-line tool and a headless daemon mode.
 
@@ -73,16 +81,18 @@
 
 ## Install
 
-Download the archive for your system from the [latest release](https://github.com/rdm-dl/rdm/releases/latest).
+Download the file for your system from the [latest release](https://github.com/rdm-dl/rdm/releases/latest).
 
 | System | File | Run |
 |---|---|---|
-| Windows 10/11 (x64) | `RDM-<version>-windows-x64.zip` | `rdm-gui.exe` |
+| Windows 10/11 (x64) | `RDM-<version>-windows-x64-setup.exe` | Run it, then start RDM from the Start menu |
+| Windows, no install | `RDM-<version>-windows-x64.zip` | `rdm-gui.exe` |
 | Linux (x64) | `RDM-<version>-linux-x64.tar.gz` | `rdm-gui` |
 | macOS (Apple Silicon) | `RDM-<version>-macos-arm64.dmg` | `RDM.app` |
 | macOS (Intel) | `RDM-<version>-macos-x64.dmg` | `RDM.app` |
 
-- **Windows / Linux:** unpack it anywhere (for example `C:\Program Files\RDM`) and run the app.
+- **Windows setup:** installs for you alone by default, with no admin prompt, or for everyone on the PC if you choose, in any folder you like. Uninstall it from Windows Settings, like any app. RDM isn't code-signed yet, so Windows may say it protected your PC or that the publisher is unknown: choose **More info**, then **Run anyway**. For scripted installs, use `/VERYSILENT` with `/CURRENTUSER` or `/ALLUSERS`.
+- **Windows zip / Linux:** unpack it into a folder of your own (for example `%LOCALAPPDATA%\RDM` or `~/Applications/RDM`) and run the app. RDM updates itself there; a folder like `C:\Program Files` would need administrator rights. On Linux, RDM adds itself to your application menu the first time it runs.
 - **macOS:** open the `.dmg` and drag **RDM** onto **Applications**. RDM isn't notarized by Apple yet, so the first time macOS will say it can't check the app: click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to RDM. After that it opens normally.
 
 ## Browser extension
@@ -130,7 +140,7 @@ Pushing a `v*` tag builds Windows, Linux and macOS archives with GitHub Actions 
 
 | Path | Purpose |
 |---|---|
-| `crates/rdm-core` | Download engine, HLS/DASH, muxer, YouTube, manager (queues, scheduler, settings), site grabber, local IPC |
+| `crates/rdm-core` | Download engine, HLS/DASH, muxer, YouTube, video sites with their own code (`src/sites/`), manager (queues, scheduler, settings), site grabber, local IPC |
 | `crates/rdm-gui` | Desktop app (egui) |
 | `crates/rdm-cli` | `rdm` command-line tool |
 | `crates/rdm-bridge` | Native-messaging host for the browser extension |

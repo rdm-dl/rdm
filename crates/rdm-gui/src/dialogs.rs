@@ -13,6 +13,15 @@ use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------- Add URL
 
+/// "Rename" window.
+pub struct Rename {
+    pub id: rdm_core::ItemId,
+    pub name: String,
+    pub error: String,
+    /// The box got the keyboard focus once.
+    pub focused: bool,
+}
+
 pub struct AddUrl {
     pub url: String,
     use_auth: bool,
@@ -24,8 +33,11 @@ pub struct AddUrl {
 
 impl AddUrl {
     pub fn from_clipboard(cb: Option<&mut arboard::Clipboard>) -> Self {
-        let clip = cb.and_then(|c| c.get_text().ok()).unwrap_or_default();
-        let clip = clip.trim();
+        Self::from_text(&cb.and_then(|c| c.get_text().ok()).unwrap_or_default())
+    }
+
+    pub fn from_text(text: &str) -> Self {
+        let clip = text.trim();
         let url = if (clip.starts_with("http://") || clip.starts_with("https://") || clip.starts_with("ftp://")) && !clip.contains(char::is_whitespace) {
             clip.to_string()
         } else {
@@ -107,6 +119,15 @@ impl Batch {
         Self { from: "1".into(), to: "10".into(), links, ..Default::default() }
     }
 
+    /// The episodes of a show, each with its place: `Show/Season 2/Show - S2 E05 Title.mp4`.
+    pub fn from_episodes(base: &std::path::Path, episodes: &[rdm_core::sites::Episode]) -> Self {
+        let links = episodes
+            .iter()
+            .map(|e| (true, DownloadRequest { url: e.url.clone(), dir: base.join(e.folder()), file_name: Some(e.file_name()), ..Default::default() }))
+            .collect();
+        Self { from: "1".into(), to: "10".into(), links, ..Default::default() }
+    }
+
     /// Expand `http://x/file*.jpg` over the numeric or letter range.
     fn expand(&mut self) {
         self.links.clear();
@@ -154,11 +175,12 @@ enum Tab {
     Folders,
     Proxy,
     Logins,
+    Sites,
     Advanced,
 }
 
 impl Tab {
-    const ALL: [(Tab, &'static str, &'static str); 8] = [
+    const ALL: [(Tab, &'static str, &'static str); 9] = [
         (Tab::General, icon::GEAR_SIX, "General"),
         (Tab::Browser, icon::PUZZLE_PIECE, "Browser"),
         (Tab::FileTypes, icon::FILE, "File types"),
@@ -166,6 +188,7 @@ impl Tab {
         (Tab::Folders, icon::FOLDER_OPEN, "Folders"),
         (Tab::Proxy, icon::GLOBE, "Proxy"),
         (Tab::Logins, icon::KEY, "Site logins"),
+        (Tab::Sites, icon::FILM_STRIP, "Video sites"),
         (Tab::Advanced, icon::SLIDERS, "Advanced"),
     ];
 }
@@ -272,6 +295,8 @@ pub fn show_all(app: &mut App, ctx: &egui::Context) {
     file_info(app, ctx);
     batch(app, ctx);
     speed_limit(app, ctx);
+    rename(app, ctx);
+    verify(app, ctx);
     options(app, ctx);
     scheduler(app, ctx);
 }
@@ -366,7 +391,11 @@ fn add_url(app: &mut App, ctx: &egui::Context) {
             r.password = Some(d.pass.clone());
         }
         app.add_url = None;
-        app.open_file_info(r);
+        if rdm_core::sites::is_series(&r.url) {
+            app.open_series(r.url, ctx);
+        } else {
+            app.open_file_info(r);
+        }
     } else if cancel || closed {
         app.add_url = None;
     }
@@ -565,7 +594,7 @@ fn batch(app: &mut App, ctx: &egui::Context) {
                         ui.label(RichText::new("The links appear here.").color(p.text_dim));
                     }
                     for (on, r) in b.links.iter_mut().take(2000) {
-                        theme::checkbox(ui, on, r.url.clone());
+                        theme::checkbox(ui, on, r.file_name.clone().unwrap_or_else(|| r.url.clone()));
                     }
                 });
             });
@@ -622,9 +651,133 @@ fn speed_limit(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// "Check file" window: compares a finished file with a checksum.
+pub struct Verify {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub text: String,
+    pub focused: bool,
+    read: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    result: Option<std::sync::Arc<std::sync::Mutex<Option<Result<rdm_core::checksum::Outcome, String>>>>>,
+}
+
+impl Verify {
+    pub fn new(path: std::path::PathBuf, name: String) -> Self {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Self { path, name, size, text: String::new(), focused: false, read: Default::default(), result: None }
+    }
+
+    fn start(&mut self) {
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (slot, read, path, text) = (result.clone(), self.read.clone(), self.path.clone(), self.text.clone());
+        read.store(0, std::sync::atomic::Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let outcome = rdm_core::checksum::check(&path, &text, &read);
+            *slot.lock().unwrap() = Some(outcome);
+        });
+        self.result = Some(result);
+    }
+}
+
+fn verify(app: &mut App, ctx: &egui::Context) {
+    let Some(d) = app.verify.as_mut() else { return };
+    let mut close = false;
+    let mut go = false;
+    let outcome = d.result.as_ref().and_then(|r| r.lock().unwrap().clone());
+    let busy = d.result.is_some() && outcome.is_none();
+    let spec = Spec { title: "Check file", size: [560.0, 270.0], min: [460.0, 270.0], resizable: false };
+    let (_, closed) = window::show(ctx, "verify", spec, |ui| {
+        let p = theme::palette(ui);
+        window::footer(ui, |ui| {
+            go |= theme::button(ui, Kind::Primary, icon::CHECK_CIRCLE, "Check", !busy).clicked();
+            close |= theme::button(ui, Kind::Ghost, icon::X, "Close", true).clicked();
+        });
+        window::body_fixed(ui, |ui| {
+            ui.add(egui::Label::new(RichText::new(&d.name).font(theme::semibold(13.5))).truncate());
+            ui.add_space(8.0);
+            field_label(ui, "Checksum from the site");
+            let r = text_field(ui, &mut d.text, "MD5, SHA-1, SHA-256 or SHA-512");
+            if !d.focused {
+                d.focused = true;
+                r.request_focus();
+            }
+            go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(8.0);
+            if busy {
+                let done = d.read.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(egui::ProgressBar::new(done as f32 / d.size.max(1) as f32));
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            match &outcome {
+                Some(Ok(o)) if o.matches => {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::ic(icon::CHECK_CIRCLE).color(p.success));
+                        ui.label(RichText::new(format!("{} matches. The file is exactly what the site published.", o.kind)).color(p.success));
+                    });
+                }
+                Some(Ok(o)) => {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::ic(icon::WARNING).color(p.danger));
+                        ui.label(RichText::new("This file does not match. It may be damaged or not the same file.").color(p.danger));
+                    });
+                    ui.add(egui::Label::new(RichText::new(format!("{}: {}", o.kind, o.actual)).size(12.0).color(p.text_dim)).wrap());
+                }
+                Some(Err(e)) => {
+                    ui.label(RichText::new(e).color(p.danger));
+                }
+                None => {}
+            }
+        });
+    });
+    if go && !busy {
+        d.start();
+    }
+    if close || closed {
+        app.verify = None;
+    }
+}
+
+fn rename(app: &mut App, ctx: &egui::Context) {
+    let Some(d) = app.rename.as_mut() else { return };
+    let mut close = false;
+    let mut apply = false;
+    let spec = Spec { title: "Rename", size: [480.0, 190.0], min: [420.0, 190.0], resizable: false };
+    let (_, closed) = window::show(ctx, "rename", spec, |ui| {
+        let p = theme::palette(ui);
+        window::footer(ui, |ui| {
+            apply |= theme::button(ui, Kind::Primary, icon::CHECK, "Rename", true).clicked();
+            close |= theme::button(ui, Kind::Ghost, icon::X, "Cancel", true).clicked();
+        });
+        window::body_fixed(ui, |ui| {
+            field_label(ui, "File name");
+            let r = text_field(ui, &mut d.name, "");
+            if !d.focused {
+                d.focused = true;
+                r.request_focus();
+            }
+            apply |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if !d.error.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new(&d.error).color(p.danger));
+            }
+        });
+    });
+    if apply {
+        match app.manager.rename(d.id, &d.name) {
+            Ok(()) => close = true,
+            Err(e) => d.error = e,
+        }
+    }
+    if close || closed {
+        app.rename = None;
+    }
+}
+
 // ---------------------------------------------------------------- Options
 
 fn options(app: &mut App, ctx: &egui::Context) {
+    let tray_ok = app.tray_available();
     let Some(o) = app.options.as_mut() else { return };
     let mut close = false;
     let mut apply = false;
@@ -663,9 +816,15 @@ fn options(app: &mut App, ctx: &egui::Context) {
                 theme::group(ui, "Startup", |ui| {
                     theme::switch_setting(ui, "Launch RDM when you sign in", "Starts quietly in the tray, ready for downloads from your browser.", &mut o.s.start_with_system);
                     theme::divider(ui);
-                    theme::switch_setting(ui, "Keep running in the tray", "Closing the window hides RDM instead of quitting it.", &mut o.s.minimize_to_tray);
-                    theme::divider(ui);
                     theme::switch_setting(ui, "Watch the clipboard for links", "Offers to download file links you copy.", &mut o.s.monitor_clipboard);
+                });
+                theme::group(ui, "System tray", |ui| {
+                    ui.add_enabled_ui(tray_ok, |ui| {
+                        let hint = if tray_ok { "RDM keeps running in the tray instead of quitting." } else { "RDM can't hide in the tray on this desktop right now, so closing the window quits it." };
+                        theme::switch_setting(ui, "Close button sends RDM to the tray", hint, &mut o.s.minimize_to_tray);
+                        theme::divider(ui);
+                        theme::switch_setting(ui, "Minimize button sends RDM to the tray", "The window leaves the taskbar. Click the tray icon to bring it back.", &mut o.s.minimize_button_to_tray);
+                    });
                 });
                 theme::group(ui, "Notifications", |ui| {
                     theme::switch_setting(ui, "Ask before downloading from the browser", "Shows the file info window, where you can change the name and folder.", &mut o.s.confirm_captured);
@@ -681,7 +840,7 @@ fn options(app: &mut App, ctx: &egui::Context) {
                         State::UpToDate => "You have the latest version.".into(),
                         State::Available(r) => format!("RDM {} is available — see the bar in the main window.", r.version),
                         State::Downloading(r, _) | State::Installing(r) => format!("Updating to RDM {}…", r.version),
-                        State::Ready(r) => format!("RDM {} is installed. Restart RDM to use it.", r.version),
+                        State::Ready(r) => format!("RDM {} is ready. Restart RDM to use it.", r.version),
                         State::Opened(r) => format!("RDM {} was downloaded.", r.version),
                         State::Failed(e, _) => e.clone(),
                         State::Idle => String::new(),
@@ -962,6 +1121,43 @@ fn options(app: &mut App, ctx: &egui::Context) {
                     if theme::button(ui, Kind::Ghost, icon::PLUS, "Add login", !o.new_login.prefix.trim().is_empty()).clicked() {
                         o.s.logins.push(o.new_login.clone());
                         o.new_login = SiteLogin { prefix: String::new(), username: String::new(), password: String::new() };
+                    }
+                });
+            }
+            Tab::Sites => {
+                theme::page_title(ui, "Video sites", "Sites RDM has its own code for. Play a video in your browser, or paste its page link into RDM.");
+                let e = &mut o.s.engine;
+                theme::group(ui, "Streams", |ui| {
+                    theme::switch_setting(ui, "Keep ads", "Ad breaks stitched into a stream are left out of the saved video. Turn this on if a video comes out with something missing.", &mut e.keep_ads);
+                    theme::divider(ui);
+                    theme::switch_setting(ui, "Save subtitles", "Saved next to the video, where players find them on their own.", &mut e.save_subtitles);
+                    ui.add_enabled_ui(e.save_subtitles, |ui| {
+                        theme::divider(ui);
+                        theme::setting(ui, "Languages", "Like en, es. Leave it empty for every language.", |ui| {
+                            ui.add(egui::TextEdit::singleline(&mut e.subtitle_languages).desired_width(120.0).margin(vec2(10.0, 7.0)));
+                        });
+                    });
+                });
+                let families = rdm_core::sites::families();
+                theme::group(ui, "Site families", |ui| {
+                    for (i, f) in families.iter().enumerate() {
+                        if i > 0 {
+                            theme::divider(ui);
+                        }
+                        let tested = f.sites.iter().filter(|s| s.tested).count();
+                        ui.horizontal(|ui| {
+                            ui.label(theme::ic(icon::FILM_STRIP).color(p.text_dim));
+                            ui.label(RichText::new(f.name).font(theme::semibold(13.5)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let color = if tested == f.sites.len() { p.accent } else { p.text_dim };
+                                ui.label(RichText::new(format!("{tested} of {} tested", f.sites.len())).size(12.0).color(color));
+                            });
+                        });
+                        let names: Vec<_> = f.sites.iter().map(|s| s.name).collect();
+                        ui.add(egui::Label::new(RichText::new(names.join(", ")).size(12.0).color(p.text_dim)).wrap());
+                        if f.browser_only {
+                            ui.label(RichText::new("Play the video in your browser; pasted links don't work here.").size(12.0).color(p.text_dim));
+                        }
                     }
                 });
             }

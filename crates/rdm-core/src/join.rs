@@ -88,10 +88,102 @@ fn move_file(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Package a downloaded MPEG-TS, AAC or MP3 stream (and a separate audio track, if any) as
+/// MP4 without ffmpeg. `Ok(None)` means this isn't such a stream, or it has something
+/// [`crate::ts`] can't carry over; the caller then goes on as if this had never been tried.
+pub async fn package_stream(video: PathBuf, audio: Option<PathBuf>, work: PathBuf, dest: PathBuf, progress: &watch::Sender<Progress>) -> io::Result<Option<PathBuf>> {
+    let total = [Some(&video), audio.as_ref()].into_iter().flatten().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    let count = Arc::new(AtomicU64::new(0));
+    let c2 = count.clone();
+    let packaged = with_progress(progress, total, move || c2.load(Ordering::Relaxed), move || {
+        std::fs::create_dir_all(&work)?;
+        let result = package_blocking(&video, audio.as_deref(), &work, &dest, &count);
+        let _ = std::fs::remove_dir_all(&work);
+        result
+    })
+    .await;
+    Ok(match packaged {
+        Ok(path) => path,
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            tracing::info!("stream left to the fallback: {e}");
+            None
+        }
+        Err(e) => return Err(e),
+    })
+}
+
+fn package_blocking(video: &Path, audio: Option<&Path>, work: &Path, dest: &Path, read: &AtomicU64) -> io::Result<Option<PathBuf>> {
+    use crate::{mux, ts};
+    let is_ts = |p: &Path| ts::sniff(p).map(|k| k.is_some() && !matches!(mux::sniff(p), Ok(Some(_))));
+    let video_ts = is_ts(video)?;
+    let audio_ts = audio.map(is_ts).transpose()?.unwrap_or(false);
+    if !video_ts && !audio_ts {
+        return Ok(None);
+    }
+    let (v_out, a_out) = (work.join("video.mp4"), work.join("audio.m4a"));
+    let muxed = audio.is_none();
+    // The tracks of one stream share a clock, also when they come from different files.
+    let mut base = None;
+    if video_ts {
+        base = ts::start_time(video, true, muxed)?;
+    }
+    if let (Some(a), true) = (audio, audio_ts) {
+        base = base.into_iter().chain(ts::start_time(a, false, true)?).min();
+    }
+    let base = base.unwrap_or(0);
+    let (mut have_v, mut have_a) = (false, false);
+    if video_ts {
+        (have_v, have_a) = ts::to_fmp4(video, Some(&v_out), muxed.then_some(a_out.as_path()), base, read)?;
+    }
+    if let (Some(a), true) = (audio, audio_ts) {
+        have_a = ts::to_fmp4(a, None, Some(&a_out), base, read)?.1;
+    }
+    // One side may already be fragmented MP4.
+    let v_file = if video_ts { have_v.then_some(v_out.as_path()) } else { Some(video) };
+    let a_file = match audio {
+        Some(a) if !audio_ts => Some(a),
+        _ => have_a.then_some(a_out.as_path()),
+    };
+    match (v_file, a_file) {
+        (Some(v), Some(a)) => Ok(mux::mp4::merge(v, a, dest)?.then(|| dest.to_path_buf())),
+        (Some(v), None) if audio.is_none() => {
+            move_file(v, dest)?;
+            Ok(Some(dest.to_path_buf()))
+        }
+        (None, Some(a)) if audio.is_none() => {
+            let m4a = crate::naming::unique_path(dest.parent().unwrap_or(Path::new(".")), &format!("{}.m4a", dest.file_stem().and_then(|s| s.to_str()).unwrap_or("audio")));
+            move_file(a, &m4a)?;
+            Ok(Some(m4a))
+        }
+        // A separate track came out empty: don't quietly lose it.
+        _ => Ok(None),
+    }
+}
+
+/// The last step for a stream: audio on its own becomes an ordinary `.m4a`, and a fragmented
+/// video an ordinary `.mp4`. `name` is the file's name without its extension.
+pub async fn finish(result: PathBuf, name: String, progress: &watch::Sender<Progress>) -> io::Result<PathBuf> {
+    let total = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
+    let work = result.with_extension("mp4.part");
+    with_progress(progress, total, file_size(work), move || {
+        if crate::mux::mp4::is_audio_only(&result) {
+            Ok(crate::mux::mp4::finish_audio(result, &name))
+        } else {
+            Ok(crate::mux::mp4::finish_video(result, &name))
+        }
+    })
+    .await
+}
+
 /// Put a separate video and audio track together as `dest`: RDM's own MP4/WebM joiner
 /// first, then ffmpeg if installed, and only if neither can, the two files side by side
 /// (`stem.video.ext` + `stem.audio.ext`). Returns the file to show as the download.
 pub async fn video_and_audio(video: PathBuf, audio: PathBuf, dest: PathBuf, stem: &str, progress: &watch::Sender<Progress>) -> io::Result<PathBuf> {
+    // Sound that came as a bare MP3 or AAC stream gets a container first.
+    let work = dest.with_extension("package");
+    if let Some(done) = package_stream(video.clone(), Some(audio.clone()), work, dest.clone(), progress).await? {
+        return Ok(done);
+    }
     let total = [&video, &audio].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
     let (v, a, d) = (video.clone(), audio.clone(), dest.clone());
     let merged = with_progress(progress, total, file_size(dest.clone()), move || crate::mux::merge(&v, &a, &d)).await;
@@ -119,6 +211,7 @@ pub async fn video_and_audio(video: PathBuf, audio: PathBuf, dest: PathBuf, stem
     let ext = |p: &Path, audio: bool| match crate::mux::sniff(p).ok().flatten() {
         Some(crate::mux::Container::Mp4) => (if audio { "m4a" } else { "mp4" }).to_string(),
         Some(crate::mux::Container::WebM) => "webm".to_string(),
+        None if std::fs::read(p).is_ok_and(|b| b.starts_with(b"ID3") || (b.len() > 1 && b[0] == 0xFF && b[1] & 0xE0 == 0xE0)) => "mp3".to_string(),
         None => p.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_string(),
     };
     let vdest = crate::naming::unique_path(&dir, &format!("{stem}.video.{}", ext(&video, false)));

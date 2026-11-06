@@ -142,6 +142,17 @@ pub fn choose(url: &Url, content_disposition: Option<&str>, content_type: Option
     name
 }
 
+/// A name for a stream whose address gives none, like `/films/sintel.ism/.m3u8`: the nearest
+/// folder with a name, then the site.
+pub fn stream_stem(stem: String, url: &Url) -> String {
+    if !stem.trim().is_empty() {
+        return stem;
+    }
+    let folder = url.path_segments().into_iter().flatten().rev().map(|s| s.rsplit_once('.').map_or(s, |(n, _)| n)).find(|s| !s.trim().is_empty());
+    let name = sanitize(folder.or(url.host_str()).unwrap_or("stream"));
+    if name.trim().is_empty() { "stream".into() } else { name }
+}
+
 /// Remove path separators, OS-reserved characters, control and bidi characters.
 pub fn sanitize(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
@@ -232,6 +243,15 @@ pub fn ext_for_mime(mime: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streams_with_no_name_in_the_address_get_one() {
+        let at = |u: &str| stream_stem(String::new(), &Url::parse(u).unwrap());
+        assert_eq!(at("https://cdn.example.com/video/tears-of-steel/tears-of-steel.ism/.m3u8"), "tears-of-steel");
+        assert_eq!(at("https://cdn.example.com/show/.mpd"), "show");
+        assert_eq!(at("https://cdn.example.com/.m3u8"), "cdn.example.com");
+        assert_eq!(stream_stem("film".into(), &Url::parse("https://x.example/.m3u8").unwrap()), "film");
+    }
 
     fn u(s: &str) -> Url {
         Url::parse(s).unwrap()

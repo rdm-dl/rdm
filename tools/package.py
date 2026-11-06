@@ -4,6 +4,7 @@ usage: python tools/package.py [--target <rust-target>] [--name <platform-name>]
 Run after `cargo build --release [--target ...]`.
 """
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -22,6 +23,13 @@ def version():
         if line.strip().startswith("version"):
             return line.split("=")[1].strip().strip('"')
     return "0.0.0"
+
+
+def sign(path):
+    """Sign a program with the command in RDM_SIGN, if there is one (see tools/installer.py)."""
+    command = os.environ.get("RDM_SIGN")
+    if command:
+        subprocess.run(command.replace("$f", f'"{path}"'), shell=True, check=True)
 
 
 def build_extensions(out_dir):
@@ -121,6 +129,8 @@ def main():
     else:
         for b in ("rdm-gui", "rdm", "rdm-bridge"):
             shutil.copy2(os.path.join(bin_dir, b + exe), out)
+            if system == "windows":
+                sign(os.path.join(out, b + exe))
         build_extensions(out)
     for f in ("README.md", "LICENSE"):
         if os.path.exists(os.path.join(ROOT, f)):
@@ -141,6 +151,10 @@ def main():
         archive = os.path.join(dist, pkg + ".tar.gz")
         with tarfile.open(archive, "w:gz") as t:
             t.add(out, arcname=pkg)
+    # RDM checks its updates against this.
+    digest = hashlib.sha256(open(archive, "rb").read()).hexdigest()
+    with open(archive + ".sha256", "w", newline="\n") as f:
+        f.write(f"{digest}  {os.path.basename(archive)}\n")
     print(archive)
 
 

@@ -225,3 +225,66 @@ async fn server_that_stops_honouring_ranges_falls_back_to_one_connection() {
     assert_eq!(std::fs::read(&path).unwrap(), *data);
     assert!(srv.ranged_requests.load(Ordering::SeqCst) > 4, "the fallback was never triggered");
 }
+
+/// A server that never states the size; each connection gets the next of `replies`.
+async fn serve_raw(replies: Vec<Vec<u8>>) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut replies = replies.into_iter();
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else { return };
+            let Some(reply) = replies.next() else { return };
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(&reply).await;
+            let _ = s.shutdown().await;
+        }
+    });
+    port
+}
+
+async fn fetch_open_ended(name: &str, replies: Vec<Vec<u8>>) -> Vec<u8> {
+    let port = serve_raw(replies).await;
+    let base = std::env::temp_dir().join(format!("rdm_open_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let req = DownloadRequest { url: format!("http://127.0.0.1:{port}/f.bin"), dir: base.join("out"), file_name: Some("f.bin".into()), ..Default::default() };
+    let dl = Download::start(req, EngineConfig::default(), base.join("tmp"), Arc::new(Limiter::default()));
+    let path = dl.wait().await.unwrap().unwrap();
+    let data = std::fs::read(path).unwrap();
+    let _ = std::fs::remove_dir_all(&base);
+    data
+}
+
+fn chunked(data: &[u8]) -> Vec<u8> {
+    let mut out = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+    for c in data.chunks(64 * 1024) {
+        out.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+        out.extend_from_slice(c);
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn downloads_from_servers_that_dont_state_the_size() {
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
+
+    // The end of the connection is the end of the file.
+    let mut plain = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+    plain.extend_from_slice(&data);
+    assert!(fetch_open_ended("plain", vec![plain]).await == data);
+
+    // Chunked transfer, as generated files often come.
+    let mut whole = chunked(&data);
+    whole.extend_from_slice(b"0\r\n\r\n");
+    assert!(fetch_open_ended("chunked", vec![whole.clone()]).await == data);
+
+    // A chunked transfer cut short is an error, not the end of the file: it starts over
+    // (no Range support), and the bytes received the first time aren't kept in front.
+    let cut = chunked(&data[..1_000_000]);
+    assert!(fetch_open_ended("cut", vec![cut, whole.clone(), whole]).await == data);
+
+    // An empty file is still a file.
+    assert!(fetch_open_ended("empty", vec![b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec()]).await.is_empty());
+}

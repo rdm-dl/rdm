@@ -28,6 +28,8 @@ pub struct Asset {
     pub name: String,
     pub url: String,
     pub size: u64,
+    /// The `<name>.sha256` file published next to it (releases before 0.1.3 have none).
+    pub sha256_url: Option<String>,
 }
 
 /// End of the release file name for this build ("…-windows-x64.zip" and so on).
@@ -44,6 +46,19 @@ pub fn platform_suffix() -> Option<&'static str> {
         None
     }
 }
+
+/// End of the name of the Windows setup program.
+const SETUP_SUFFIX: &str = "windows-x64-setup.exe";
+
+/// Whether this copy came from the setup program, as opposed to being unpacked somewhere. Such a
+/// copy is updated by the next setup, which also keeps its entry in Windows' app list right.
+pub fn from_setup() -> bool {
+    cfg!(windows) && std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("unins000.exe").exists())).unwrap_or(false)
+}
+
+/// What to pass the setup program for a quiet update. It finds this copy by itself, whatever
+/// folder it's in, and keeps its install mode, asking for admin rights if that was for all users.
+pub const SETUP_ARGS: [&str; 4] = ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/relaunch=1"];
 
 /// True when this system's update is a disk image to open (macOS) rather than files to swap in.
 pub fn opens_installer() -> bool {
@@ -68,17 +83,23 @@ pub async fn latest() -> Result<Release, String> {
     }
     let text = resp.text().await.map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    parse_release(&v).ok_or_else(|| "Unexpected answer from GitHub".into())
+    parse_release_for(&v, if from_setup() { Some(SETUP_SUFFIX) } else { platform_suffix() }).filter(|r| r.asset.is_some()).or_else(|| parse_release(&v)).ok_or_else(|| "Unexpected answer from GitHub".into())
 }
 
 fn parse_release(v: &serde_json::Value) -> Option<Release> {
+    parse_release_for(v, platform_suffix())
+}
+
+/// The release, with the file ending in `suffix`.
+fn parse_release_for(v: &serde_json::Value, suffix: Option<&str>) -> Option<Release> {
     let tag = v["tag_name"].as_str()?;
-    let suffix = platform_suffix();
     let asset = v["assets"].as_array().and_then(|list| {
         list.iter().find_map(|a| {
             let name = a["name"].as_str()?;
             suffix.filter(|s| name.ends_with(s))?;
-            Some(Asset { name: name.to_string(), url: a["browser_download_url"].as_str()?.to_string(), size: a["size"].as_u64().unwrap_or(0) })
+            let checksum = format!("{name}.sha256");
+            let sha256_url = list.iter().find(|c| c["name"].as_str() == Some(&checksum)).and_then(|c| c["browser_download_url"].as_str()).map(str::to_string);
+            Some(Asset { name: name.to_string(), url: a["browser_download_url"].as_str()?.to_string(), size: a["size"].as_u64().unwrap_or(0), sha256_url })
         })
     });
     Some(Release {
@@ -102,6 +123,29 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+/// The checksum published for a download.
+pub async fn fetch_sha256(url: &str) -> Result<String, String> {
+    let fail = |e: String| format!("Couldn't get the update's checksum: {e}");
+    let client = reqwest::Client::builder().user_agent(concat!("RDM/", env!("CARGO_PKG_VERSION"))).timeout(Duration::from_secs(20)).build().map_err(|e| fail(e.to_string()))?;
+    let resp = client.get(url).send().await.map_err(|e| fail(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(fail(resp.status().to_string()));
+    }
+    let text = resp.text().await.map_err(|e| fail(e.to_string()))?;
+    let hash = text.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
+    if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) { Ok(hash) } else { Err(fail("unreadable file".into())) }
+}
+
+/// Check a downloaded file against its checksum. Run off the async workers: this reads the file.
+pub fn verify_sha256(file: &Path, expected: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(file).map_err(|e| e.to_string())?;
+    let mut hash = Sha256::new();
+    std::io::copy(&mut f, &mut hash).map_err(|e| e.to_string())?;
+    let got = hash.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    if got == expected { Ok(()) } else { Err("The downloaded update is damaged. Please try again.".into()) }
 }
 
 /// Unpack `archive` (the release .zip / .tar.gz) in `work` and put its files into `app_dir`.
@@ -230,6 +274,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_copy_from_setup_takes_the_setup_and_others_the_archive() {
+        let v = serde_json::json!({"tag_name": "v0.2.0", "assets": [
+            {"name": "RDM-0.2.0-windows-x64.zip", "browser_download_url": "https://x/z"},
+            {"name": "RDM-0.2.0-windows-x64-setup.exe", "browser_download_url": "https://x/s"},
+            {"name": "RDM-0.2.0-windows-x64-setup.exe.sha256", "browser_download_url": "https://x/s.sha256"},
+        ]});
+        let setup = parse_release_for(&v, Some(SETUP_SUFFIX)).unwrap().asset.unwrap();
+        assert_eq!(setup.url, "https://x/s");
+        assert_eq!(setup.sha256_url.as_deref(), Some("https://x/s.sha256"));
+        assert_eq!(parse_release_for(&v, Some("windows-x64.zip")).unwrap().asset.unwrap().url, "https://x/z");
+    }
+
+    #[test]
+    fn checksums_are_found_and_verified() {
+        let assets: Vec<serde_json::Value> = ["windows-x64.zip", "linux-x64.tar.gz", "macos-arm64.dmg", "macos-x64.dmg"]
+            .iter()
+            .flat_map(|s| {
+                [
+                    serde_json::json!({"name": format!("RDM-{s}"), "browser_download_url": format!("https://x/{s}")}),
+                    serde_json::json!({"name": format!("RDM-{s}.sha256"), "browser_download_url": format!("https://x/{s}.sha256")}),
+                ]
+            })
+            .collect();
+        let release = parse_release(&serde_json::json!({"tag_name": "v0.2.0", "assets": assets})).unwrap();
+        if let Some(asset) = release.asset {
+            assert!(!asset.url.ends_with(".sha256"));
+            assert_eq!(asset.sha256_url, Some(format!("{}.sha256", asset.url)));
+        }
+        let file = std::env::temp_dir().join(format!("rdm_sha_{}", std::process::id()));
+        std::fs::write(&file, b"abc").unwrap();
+        assert!(verify_sha256(&file, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").is_ok());
+        assert!(verify_sha256(&file, &"0".repeat(64)).is_err());
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
     fn versions_compare_by_number() {
         assert!(is_newer("0.1.2", "0.1.1"));
         assert!(is_newer("v0.1.10", "0.1.9"));
@@ -247,6 +327,10 @@ mod tests {
             "html_url": "https://github.com/rdm-dl/rdm/releases/tag/v0.2.0",
             "assets": [
                 {"name": "RDM-0.2.0-windows-x64.zip", "browser_download_url": "https://x/w.zip", "size": 10},
+                {"name": "RDM-0.2.0-windows-x64.zip.sha256", "browser_download_url": "https://x/w.zip.sha256", "size": 90},
+                {"name": "RDM-0.2.0-linux-x64.tar.gz.sha256", "browser_download_url": "https://x/l.tar.gz.sha256", "size": 90},
+                {"name": "RDM-0.2.0-macos-arm64.dmg.sha256", "browser_download_url": "https://x/a.dmg.sha256", "size": 90},
+                {"name": "RDM-0.2.0-macos-x64.dmg.sha256", "browser_download_url": "https://x/i.dmg.sha256", "size": 90},
                 {"name": "RDM-0.2.0-linux-x64.tar.gz", "browser_download_url": "https://x/l.tar.gz", "size": 11},
                 {"name": "RDM-0.2.0-macos-arm64.dmg", "browser_download_url": "https://x/a.dmg", "size": 12},
                 {"name": "RDM-0.2.0-macos-x64.dmg", "browser_download_url": "https://x/i.dmg", "size": 13}

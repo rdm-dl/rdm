@@ -1,5 +1,6 @@
 //! RDM core: a segmented, resumable, multi-connection download engine.
 
+pub mod checksum;
 pub mod chunks;
 pub mod config;
 pub mod dash;
@@ -10,13 +11,17 @@ pub mod grabber;
 pub mod hls;
 pub mod join;
 pub mod limiter;
+pub mod live;
 pub mod manager;
 pub mod mirror;
 pub mod mux;
 pub mod naming;
 pub mod pair;
 pub mod settings;
+pub mod sites;
 pub mod storage;
+pub mod subtitles;
+pub mod ts;
 pub mod update;
 pub mod youtube;
 pub mod ytsolve;

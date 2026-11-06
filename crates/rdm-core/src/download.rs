@@ -25,7 +25,7 @@ use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -42,6 +42,10 @@ pub enum DownloadError {
     Io(#[from] std::io::Error),
     #[error("too many failures on chunk {0}: {1}")]
     Retries(u32, String),
+    #[error("Not enough disk space: this needs {}, and {} is free. Free up some space and press Resume.", readable_size(*.0), readable_size(*.1))]
+    DiskSpace(u64, u64),
+    #[error("The disk is full. Free up some space and press Resume.")]
+    DiskFull,
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]
@@ -50,12 +54,69 @@ pub enum DownloadError {
 
 type Result<T> = std::result::Result<T, DownloadError>;
 
+fn readable_size(b: u64) -> String {
+    match b {
+        0..1_048_576 => format!("{} KB", b / 1024),
+        1_048_576..1_073_741_824 => format!("{:.0} MB", b as f64 / 1_048_576.0),
+        _ => format!("{:.1} GB", b as f64 / 1_073_741_824.0),
+    }
+}
+
+impl DownloadError {
+    /// The disk ran out while writing: retrying can't help.
+    pub(crate) fn is_disk_full(&self) -> bool {
+        matches!(self, Self::DiskFull) || matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::StorageFull)
+    }
+}
+
+/// Free space on the volume `path` is (or will be) on. `None` when the system can't say; some
+/// network drives report 0, which says nothing either.
+fn free_space(path: &Path) -> Option<u64> {
+    let existing = path.ancestors().find(|a| a.exists())?;
+    fs4::available_space(existing).ok().filter(|f| *f > 0)
+}
+
+fn same_volume(a: &Path, b: &Path) -> bool {
+    let existing = |p: &Path| p.ancestors().find(|x| x.exists()).map(Path::to_path_buf);
+    let (Some(a), Some(b)) = (existing(a), existing(b)) else { return true };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let root = |p: &Path| p.components().next().map(|c| c.as_os_str().to_string_lossy().to_lowercase());
+        root(&a) == root(&b)
+    }
+}
+
+/// Say so before starting if the file can't fit. Parts go to `temp`, then move to `dest`
+/// (taking up the space a second time only when that is another drive).
+fn check_space(temp: &Path, dest: &Path, total: u64, remaining: u64) -> Result<()> {
+    if let Some(free) = free_space(temp) {
+        if free < remaining {
+            return Err(DownloadError::DiskSpace(remaining, free));
+        }
+    }
+    if !same_volume(temp, dest) {
+        if let Some(free) = free_space(dest) {
+            if free < total {
+                return Err(DownloadError::DiskSpace(total, free));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Everything the caller can specify for a download.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub url: String,
     /// Folder to save into.
     pub dir: PathBuf,
+    /// A folder inside the default one, for a caller that doesn't know where that is.
+    pub subfolder: Option<String>,
     /// Forced file name (otherwise chosen from the server / URL).
     pub file_name: Option<String>,
     pub referer: Option<String>,
@@ -108,6 +169,9 @@ pub struct Progress {
     /// While joining pieces into the final file: how far it got (0..1).
     #[serde(default)]
     pub joining: Option<f32>,
+    /// While recording a live stream: the seconds caught so far.
+    #[serde(default)]
+    pub recording: Option<u64>,
 }
 
 impl Progress {
@@ -123,6 +187,7 @@ impl Progress {
             chunks: vec![],
             final_path: None,
             joining: None,
+            recording: None,
         }
     }
     pub fn eta(&self) -> Option<Duration> {
@@ -285,7 +350,7 @@ impl Download {
     }
 }
 
-fn build_client(cfg: &EngineConfig, req: &DownloadRequest) -> Result<Client> {
+pub(crate) fn build_client(cfg: &EngineConfig, req: &DownloadRequest) -> Result<Client> {
     let mut headers = HeaderMap::new();
     headers.insert(header::ACCEPT, HeaderValue::from_static("*/*"));
     headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
@@ -431,11 +496,16 @@ async fn pump(ctx: &Ctx, id: u32, resp: Response, control: &watch::Receiver<Cont
         let bytes = item?;
         let (take, complete) = {
             let mut sh = ctx.shared.lock().unwrap();
+            // The server didn't say the size: the file ends where the stream ends.
+            let open_ended = sh.map.total == 0;
             let Some(c) = sh.map.get_mut(id) else { return Ok(true) };
+            if open_ended {
+                c.end = c.pos() + bytes.len() as u64;
+            }
             let left = c.remaining();
             let take = (bytes.len() as u64).min(left) as usize;
             c.done += take as u64;
-            let complete = c.is_complete();
+            let complete = c.is_complete() && !open_ended;
             sh.last_data.insert(id, Instant::now());
             (take, complete)
         };
@@ -531,6 +601,10 @@ async fn worker_inner(ctx: &Arc<Ctx>, id_ref: &mut u32, mut first: Option<Respon
                             tracing::info!("server refused another connection; limiting to {others}");
                             return Ok(WorkerExit::Done);
                         }
+                    }
+                    if e.is_disk_full() {
+                        ctx.shared.lock().unwrap().active.remove(&id);
+                        return Err(DownloadError::DiskFull);
                     }
                     if ctx.cfg.max_retries > 0 && failures > ctx.cfg.max_retries {
                         ctx.shared.lock().unwrap().active.remove(&id);
@@ -646,6 +720,7 @@ async fn run(
     mut control: watch::Receiver<Control>,
 ) -> Result<Option<PathBuf>> {
     let result = run_inner(&req, cfg, temp_dir, global_limiter, limiter, &progress, &mut control).await;
+    let result = result.map_err(|e| if e.is_disk_full() { DownloadError::DiskFull } else { e });
     progress.send_modify(|p| match &result {
         Ok(Some(path)) => {
             p.status = Status::Complete;
@@ -684,20 +759,28 @@ async fn run_inner(
         let resolved = crate::youtube::resolve(req, &cfg).await?;
         return Box::pin(run_inner(&resolved, cfg, temp_dir, global_limiter, limiter, progress, control)).await;
     }
+    // A page of a site with its own code becomes that site's stream.
+    if crate::sites::matches(&req.url) {
+        let cookies = req.cookies.clone().or_else(|| crate::sites::sign_in_for(&req.url));
+        let found = crate::sites::find(&req.url, cookies.as_deref(), &build_client(&cfg, req)?).await?;
+        let resolved = crate::sites::stream_request(req, &found);
+        return Box::pin(run_inner(&resolved, cfg, temp_dir, global_limiter, limiter, progress, control)).await;
+    }
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
     let client = build_client(&cfg, req)?;
     let tmp = TempDir::new(&temp_dir)?;
-    if crate::pair::audio_url(&req.url).is_some() {
+    // Video and audio playlists the player loaded separately are handled by the HLS code.
+    if crate::pair::audio_url(&req.url).is_some() && !crate::hls::looks_like_hls(&req.url, None) {
         return crate::pair::run(req, &cfg, tmp, global_limiter, limiter, progress, control).await;
     }
     if url.scheme() == "ftp" {
         return crate::ftp::run(req, &cfg, tmp, global_limiter, limiter, progress, control).await;
     }
     if crate::hls::looks_like_hls(&req.url, None) {
-        return crate::hls::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+        return crate::hls::run(req, client, &cfg, tmp, limiter, global_limiter, progress, control).await;
     }
     if crate::dash::looks_like_dash(&req.url, None) {
-        return crate::dash::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+        return crate::dash::run(req, client, &cfg, tmp, limiter, global_limiter, progress, control).await;
     }
     let saved = tmp.load().ok().flatten().filter(|s| crate::youtube::same_stream(&s.url, &req.url) && s.resumable);
 
@@ -761,12 +844,16 @@ async fn run_inner(
     if crate::hls::looks_like_hls(&req.url, info.content_type.as_deref()) {
         drop(first_resp);
         tmp.reset()?;
-        return crate::hls::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+        return crate::hls::run(req, client, &cfg, tmp, limiter, global_limiter, progress, control).await;
     }
     if crate::dash::looks_like_dash(&req.url, info.content_type.as_deref()) {
         drop(first_resp);
         tmp.reset()?;
-        return crate::dash::run(req, client, cfg.max_connections, tmp, limiter, global_limiter, progress, control).await;
+        return crate::dash::run(req, client, &cfg, tmp, limiter, global_limiter, progress, control).await;
+    }
+    if let Some(total) = info.total {
+        let done: u64 = map.chunks.iter().map(|c| c.done).sum();
+        check_space(&tmp.path, &req.dir, total, total.saturating_sub(done))?;
     }
     let validator = info.etag.clone().or(info.last_modified.clone());
     let ctx = Arc::new(Ctx {
@@ -811,7 +898,9 @@ async fn run_inner(
     let mut started: HashSet<u32> = HashSet::new();
     let incomplete: Vec<u32> = ctx.shared.lock().unwrap().map.incomplete_ids();
     let mut first_resp = first_resp;
-    if incomplete.contains(&first_id) {
+    // With no size to go by (or an empty file) the only chunk looks complete from the start.
+    let no_size = ctx.shared.lock().unwrap().map.total == 0;
+    if incomplete.contains(&first_id) || no_size {
         spawn(&mut workers, first_id, first_resp.take());
         started.insert(first_id);
     }
@@ -1065,6 +1154,21 @@ pub async fn probe_info(req: &DownloadRequest, cfg: &EngineConfig) -> Result<Pro
     // A YouTube job isn't fetched until it starts; report what the extension knows.
     if crate::youtube::is_job(&req.url) {
         return Ok(crate::youtube::probe_info(req));
+    }
+    if crate::sites::matches(&req.url) {
+        let cookies = req.cookies.clone().or_else(|| crate::sites::sign_in_for(&req.url));
+        let found = crate::sites::find(&req.url, cookies.as_deref(), &build_client(cfg, req)?).await?;
+        let name = req.file_name.clone().or_else(|| found.file_name()).unwrap_or_else(|| format!("video.{}", found.ext));
+        return Ok(ProbeInfo {
+            file_name: naming::sanitize(&name),
+            total: None,
+            content_type: Some(if matches!(found.ext.as_str(), "mp3" | "m4a" | "flac" | "ogg") { "audio/mpeg".into() } else { "video/mp4".into() }),
+            resumable: false,
+            // The stream's address expires: it's asked for again when the download starts.
+            final_url: req.url.clone(),
+            last_modified: None,
+            etag: None,
+        });
     }
     let url = Url::parse(&req.url).map_err(|e| DownloadError::Other(format!("bad url: {e}")))?;
     let client = build_client(cfg, req)?;

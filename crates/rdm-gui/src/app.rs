@@ -7,7 +7,7 @@ use crate::tray::{Tray, TrayAction};
 use crate::util;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
 use rdm_core::ipc::UiRequest;
-use rdm_core::settings::{MAIN_QUEUE, OnQueueDone};
+use rdm_core::settings::{ListOrder, MAIN_QUEUE, OnQueueDone};
 use rdm_core::{DownloadRequest, Event, Item, ItemId, ItemState, Manager};
 use std::collections::{BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -39,14 +39,19 @@ pub struct App {
     events: broadcast::Receiver<Event>,
     filter: Filter,
     search: String,
+    order: ListOrder,
     selected: BTreeSet<ItemId>,
     anchor: Option<ItemId>,
     pub add_url: Option<AddUrl>,
+    /// A show's episodes being read.
+    series: Option<std::sync::Arc<std::sync::Mutex<Option<Result<Vec<rdm_core::sites::Episode>, String>>>>>,
     pub file_infos: VecDeque<FileInfo>,
     pub batch: Option<Batch>,
     pub options: Option<Options>,
     pub scheduler: Option<Scheduler>,
     pub speed_limit: Option<SpeedLimit>,
+    pub rename: Option<crate::dialogs::Rename>,
+    pub verify: Option<crate::dialogs::Verify>,
     pub grabber: Option<Grabber>,
     /// New versions of RDM.
     pub updater: crate::updater::Updater,
@@ -66,8 +71,17 @@ pub struct App {
     last_clip_check: Instant,
     status_msg: Option<(String, Instant)>,
     tray: Option<Tray>,
+    /// Started hidden (at sign-in): when, until the tray is known to be showing.
+    hidden_start: Option<Instant>,
+    /// Passes left in which to re-hide the window after a hidden start.
+    rehide: u8,
+    /// The window was minimized on the last pass.
+    was_minimized: bool,
     exiting: bool,
 }
+
+/// How long a panel gets to show the tray icon after a hidden start.
+const HIDDEN_START_GRACE: Duration = Duration::from_secs(20);
 
 fn category_icon(name: &str) -> &'static str {
     match name {
@@ -104,14 +118,18 @@ impl App {
             events,
             filter: Filter::All,
             search: String::new(),
+            order: ListOrder::Newest,
             selected: BTreeSet::new(),
             anchor: None,
             add_url: None,
+            series: None,
             file_infos: VecDeque::new(),
             batch: None,
             options: None,
             scheduler: None,
             speed_limit: None,
+            rename: None,
+            verify: None,
             grabber: None,
             progress_windows: BTreeSet::new(),
             completed: VecDeque::new(),
@@ -122,9 +140,14 @@ impl App {
             last_clip: String::new(),
             last_clip_check: Instant::now(),
             status_msg: None,
-            tray: crate::tray::create(ctx.clone()),
+            hidden_start: std::env::args().any(|a| a == "--minimized").then(Instant::now),
+            rehide: 3,
+            was_minimized: false,
+            tray: None,
             exiting: false,
         };
+        app.tray = crate::tray::create(ctx.clone(), &app.rt);
+        app.order = app.manager.settings().list_order;
         if let Some(cb) = app.clipboard.as_mut() {
             app.last_clip = cb.get_text().unwrap_or_default();
         }
@@ -134,9 +157,50 @@ impl App {
         app
     }
 
+    /// A show's page: read its episodes, then offer them in the batch window.
+    pub fn open_series(&mut self, url: String, ctx: &egui::Context) {
+        if rdm_core::sites::needs_browser(&url) {
+            self.flash("Open this page in your browser and use the RDM button there");
+            return;
+        }
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.series = Some(slot.clone());
+        self.flash("Reading the list of episodes…");
+        let (cfg, ctx) = (self.manager.settings().engine, ctx.clone());
+        self.rt.spawn(async move {
+            let found = rdm_core::sites::episodes(&url, None, &cfg).await.map_err(|e| e.to_string());
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(found);
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_series(&mut self) {
+        let done = self.series.as_ref().and_then(|s| s.lock().ok()?.take());
+        let Some(found) = done else { return };
+        self.series = None;
+        match found {
+            Ok(list) if list.is_empty() => self.flash("No episodes found for this show"),
+            Ok(list) => {
+                let s = self.manager.settings();
+                let category = s.category_for("episode.mp4").map(|c| c.name.clone());
+                let base = s.folder_for(category.as_deref());
+                self.flash(format!("Found {} episodes", list.len()));
+                self.batch = Some(Batch::from_episodes(&base, &list));
+            }
+            Err(e) => self.flash(format!("Couldn't read the episodes: {e}")),
+        }
+    }
+
     pub fn open_file_info(&mut self, req: DownloadRequest) {
         let fi = FileInfo::new(req, &self.manager, &self.rt);
         self.file_infos.push_back(fi);
+    }
+
+    /// The tray icon is showing, so a hidden window can be brought back.
+    pub fn tray_available(&self) -> bool {
+        self.tray.as_ref().is_some_and(Tray::available)
     }
 
     pub fn flash(&mut self, msg: impl Into<String>) {
@@ -194,6 +258,13 @@ impl App {
     fn poll_external(&mut self, ctx: &egui::Context) {
         while let Ok(req) = self.ui_rx.try_recv() {
             match req {
+                UiRequest::Quit => {
+                    self.exiting = true;
+                    // A window hidden in the tray gets no frames, so it has to be asked twice.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    ctx.request_repaint();
+                }
                 UiRequest::Show => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -265,7 +336,111 @@ impl App {
             .cloned()
             .collect();
         v.sort_by_key(|i| std::cmp::Reverse((i.added, i.id)));
+        // A stable sort: equal entries stay newest first.
+        match self.order {
+            ListOrder::Newest => {}
+            ListOrder::Oldest => v.reverse(),
+            ListOrder::Name => v.sort_by_cached_key(|i| i.file_name.to_lowercase()),
+            ListOrder::Size => v.sort_by_key(|i| std::cmp::Reverse(i.total.unwrap_or(i.downloaded))),
+            ListOrder::Status => v.sort_by_key(|i| match i.state {
+                ItemState::Running => 0,
+                ItemState::Queued => 1,
+                ItemState::Stopped => 2,
+                ItemState::Failed(_) => 3,
+                ItemState::Complete => 4,
+            }),
+        }
         v
+    }
+
+    /// Links from pasted or dropped text: one opens the new download window, several the batch.
+    fn take_links(&mut self, text: &str) {
+        let batch = Batch::from_text(text);
+        match batch.links.len() {
+            0 => self.flash("No links found"),
+            1 => self.add_url = Some(AddUrl::from_text(&batch.links[0].1.url)),
+            _ => self.batch = Some(batch),
+        }
+    }
+
+    /// A list of links dropped on the window: a text file or a browser's `.url` shortcut.
+    fn dropped_files(&mut self, ctx: &egui::Context) {
+        let files = ctx.input(|i| i.raw.dropped_files.clone());
+        if files.is_empty() {
+            return;
+        }
+        let mut text = String::new();
+        for path in files.iter().map(|f| f.path()) {
+            let small = std::fs::metadata(path).is_ok_and(|m| m.len() < 8 << 20);
+            if let Some(s) = small.then(|| std::fs::read_to_string(path).ok()).flatten() {
+                text.push_str(&s.replace("URL=", " "));
+                text.push('\n');
+            }
+        }
+        self.take_links(&text);
+    }
+
+    /// What the window shows while files are dragged over it.
+    fn drop_hint(&self, ctx: &egui::Context) {
+        if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+            return;
+        }
+        let rect = ctx.content_rect();
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop-hint"));
+        let painter = ctx.layer_painter(layer);
+        let dark = ctx.global_style().visuals.dark_mode;
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_black_alpha(if dark { 170 } else { 110 }));
+        painter.text(rect.center(), Align2::CENTER_CENTER, "Drop a list of links to add them", theme::semibold(18.0), Color32::WHITE);
+    }
+
+    /// Keyboard shortcuts of the main window. None of them apply while typing in a box.
+    fn shortcuts(&mut self, ctx: &egui::Context, items: &[Item]) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let pasted = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None }));
+        if let Some(text) = pasted {
+            self.take_links(&text);
+        }
+        use egui::Key;
+        let pressed = |ctx: &egui::Context, command: bool, key: Key| ctx.input(|i| i.modifiers.command == command && i.key_pressed(key));
+        if pressed(ctx, true, Key::N) {
+            self.new_download();
+        }
+        if pressed(ctx, true, Key::F) {
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new("search")));
+        }
+        if pressed(ctx, true, Key::Comma) {
+            self.options = Some(Options::new(&self.manager));
+        }
+        if pressed(ctx, true, Key::A) {
+            self.selected = items.iter().map(|i| i.id).collect();
+        }
+        if self.selected.is_empty() {
+            return;
+        }
+        let chosen: Vec<&Item> = items.iter().filter(|i| self.selected.contains(&i.id)).collect();
+        if pressed(ctx, false, Key::Delete) && self.confirm_delete.is_none() {
+            self.confirm_delete = Some(self.selected.iter().copied().collect());
+        }
+        // Space pauses what's running, otherwise it resumes what can be.
+        if pressed(ctx, false, Key::Space) {
+            let running: Vec<ItemId> = chosen.iter().filter(|i| i.state == ItemState::Running).map(|i| i.id).collect();
+            if running.is_empty() {
+                chosen.iter().filter(|i| i.state != ItemState::Complete).for_each(|i| self.manager.start(i.id));
+            } else {
+                running.into_iter().for_each(|id| self.manager.stop(id));
+            }
+        }
+        if let [one] = chosen[..] {
+            let id = one.id;
+            if pressed(ctx, false, Key::Enter) {
+                self.open_item(id);
+            }
+            if pressed(ctx, false, Key::F2) && one.state != ItemState::Running {
+                self.rename_item(id);
+            }
+        }
     }
 
     fn filter_title(&self) -> String {
@@ -674,11 +849,23 @@ impl App {
                 } else if theme::icon_button(ui, icon::PLAY_CIRCLE, "Start queue").clicked() {
                     self.manager.start_queue(MAIN_QUEUE);
                 }
+                let sort = theme::icon_button(ui, icon::SORT_ASCENDING, "Sort");
+                egui::Popup::menu(&sort).show(|ui| {
+                    ui.set_min_width(170.0);
+                    for o in ListOrder::ALL {
+                        if ui.selectable_label(self.order == o, o.label()).clicked() && self.order != o {
+                            self.order = o;
+                            let mut s = self.manager.settings();
+                            s.list_order = o;
+                            self.manager.set_settings(s);
+                        }
+                    }
+                });
                 ui.add_space(6.0);
                 // Search: as wide as the room next to the title allows.
                 let w = (ui.available_width() - 40.0).clamp(110.0, 240.0);
                 let hint = if w < 170.0 { "Search" } else { "Search downloads" };
-                let search = egui::TextEdit::singleline(&mut self.search).hint_text(hint).desired_width(w).margin(vec2(10.0, 7.0));
+                let search = egui::TextEdit::singleline(&mut self.search).id(egui::Id::new("search")).hint_text(hint).desired_width(w).margin(vec2(10.0, 7.0));
                 ui.add(search);
                 ui.label(theme::ic(icon::MAGNIFYING_GLASS).color(p.text_dim));
             });
@@ -727,6 +914,33 @@ impl App {
 
     // ------------------------------------------------------------- list
 
+    fn open_item(&mut self, id: ItemId) {
+        match self.manager.item(id) {
+            Some(it) if it.state == ItemState::Complete => {
+                if let Some(p) = it.final_path {
+                    util::open_file(&p);
+                }
+            }
+            Some(_) => {
+                self.progress_windows.insert(id);
+            }
+            None => {}
+        }
+    }
+
+    fn verify_item(&mut self, id: ItemId) {
+        if let Some(path) = self.manager.item(id).and_then(|i| i.final_path) {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.verify = Some(crate::dialogs::Verify::new(path, name));
+        }
+    }
+
+    fn rename_item(&mut self, id: ItemId) {
+        if let Some(it) = self.manager.item(id) {
+            self.rename = Some(crate::dialogs::Rename { id, name: it.file_name, error: String::new(), focused: false });
+        }
+    }
+
     fn empty_state(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(ui);
         ui.vertical_centered(|ui| {
@@ -736,7 +950,7 @@ impl App {
             ui.painter().text(r.center(), Align2::CENTER_CENTER, icon::CLOUD_ARROW_DOWN, theme::icon_font(36.0), p.accent);
             ui.add_space(14.0);
             ui.label(RichText::new("No downloads here yet").font(theme::semibold(17.0)));
-            ui.label(RichText::new("Paste a link, drop it from your browser, or start a new download.").color(p.text_dim));
+            ui.label(RichText::new("Copy a link and press Ctrl+V, or start a new download.").color(p.text_dim));
             ui.add_space(12.0);
             if theme::button(ui, Kind::Primary, icon::PLUS, "New download", true).clicked() {
                 self.new_download();
@@ -780,10 +994,12 @@ impl App {
                     };
                     entry(ui, complete, icon::ARROW_SQUARE_OUT, "Open", "open");
                     entry(ui, complete, icon::FOLDER_OPEN, "Show in folder", "folder");
+                    entry(ui, complete, icon::CHECK_CIRCLE, "Check file…", "verify");
                     ui.separator();
                     entry(ui, !complete && it.state != ItemState::Running, icon::PLAY, "Resume", "resume");
-                    entry(ui, it.state == ItemState::Running, icon::PAUSE, "Pause", "stop");
+                    entry(ui, it.state == ItemState::Running, icon::PAUSE, if it.recording.is_some() { "Stop and save" } else { "Pause" }, "stop");
                     entry(ui, true, icon::GAUGE, "Details", "progress");
+                    entry(ui, it.state != ItemState::Running, icon::PENCIL_SIMPLE, "Rename…", "rename");
                     entry(ui, true, icon::ARROW_CLOCKWISE, "Download again", "redownload");
                     ui.menu_button(theme::mi(icon::QUEUE, "Move to queue"), |ui| {
                         for q in self.manager.settings().queues {
@@ -821,17 +1037,7 @@ impl App {
             }
         }
         if let Some(id) = double {
-            match self.manager.item(id) {
-                Some(it) if it.state == ItemState::Complete => {
-                    if let Some(p) = it.final_path {
-                        util::open_file(&p);
-                    }
-                }
-                Some(_) => {
-                    self.progress_windows.insert(id);
-                }
-                None => {}
-            }
+            self.open_item(id);
         }
         if let Some((id, a)) = action {
             let it = self.manager.item(id);
@@ -852,16 +1058,11 @@ impl App {
                     self.progress_windows.insert(id);
                 }
                 "redownload" => self.manager.redownload(id, None),
+                "rename" => self.rename_item(id),
+                "verify" => self.verify_item(id),
                 "delete" => self.confirm_delete = Some(if self.selected.contains(&id) { self.selected.iter().copied().collect() } else { vec![id] }),
                 _ => {}
             }
-        }
-        let (del, all) = ui.input(|i| (i.key_pressed(egui::Key::Delete), i.modifiers.command && i.key_pressed(egui::Key::A)));
-        if del && !self.selected.is_empty() && self.confirm_delete.is_none() {
-            self.confirm_delete = Some(self.selected.iter().copied().collect());
-        }
-        if all {
-            self.selected = ids.into_iter().collect();
         }
     }
 
@@ -882,6 +1083,7 @@ impl App {
 
         let (status_text, color) = match &it.state {
             ItemState::Running if it.joining.is_some() => ("Joining", p.accent),
+            ItemState::Running if it.recording.is_some() => ("Recording", p.danger),
             ItemState::Running => ("Downloading", p.accent),
             ItemState::Complete => ("Completed", p.success),
             ItemState::Failed(_) => ("Error", p.danger),
@@ -912,7 +1114,8 @@ impl App {
                     if theme::icon_button(ui, icon::GAUGE, "Details").clicked() {
                         act = Some("progress");
                     }
-                    if theme::icon_button(ui, icon::PAUSE, "Pause").clicked() {
+                    let (ic, tip) = if it.recording.is_some() { (icon::STOP, "Stop and save") } else { (icon::PAUSE, "Pause") };
+                    if theme::icon_button(ui, ic, tip).clicked() {
                         act = Some("stop");
                     }
                 }
@@ -951,6 +1154,10 @@ impl App {
         let sub = match &it.state {
             ItemState::Running if it.joining.is_some() => {
                 format!("Putting the file together  ·  {:.0}%", it.joining.unwrap_or(0.0) * 100.0)
+            }
+            ItemState::Running if it.recording.is_some() => {
+                let seconds = it.recording.unwrap_or(0);
+                format!("{:02}:{:02}:{:02} recorded  ·  {}", seconds / 3600, seconds / 60 % 60, seconds % 60, util::size(it.downloaded))
             }
             ItemState::Running | ItemState::Stopped | ItemState::Queued => match it.total {
                 Some(t) => format!("{} of {}  ·  {:.0}%", util::size(it.downloaded), util::size(t), it.progress_fraction().unwrap_or(0.0) * 100.0),
@@ -1004,7 +1211,8 @@ impl App {
             crate::window::footer(ui, |ui| {
                 match it.state {
                     ItemState::Running => {
-                        if theme::button(ui, Kind::Primary, icon::PAUSE, "Pause", true).clicked() {
+                        let (ic, label) = if it.recording.is_some() { (icon::STOP, "Stop and save") } else { (icon::PAUSE, "Pause") };
+                        if theme::button(ui, Kind::Primary, ic, label, true).clicked() {
                             self.manager.stop(id);
                         }
                     }
@@ -1289,6 +1497,7 @@ fn segment_bar(ui: &mut egui::Ui, it: &Item) {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_external(ctx);
+        self.poll_series();
         let actions: Vec<TrayAction> = self.tray.as_ref().map(|t| t.rx.try_iter().collect()).unwrap_or_default();
         for a in actions {
             match a {
@@ -1309,14 +1518,38 @@ impl eframe::App for App {
             }
         }
         // Closing the window hides it to the tray instead of quitting.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.exiting && self.tray.is_some() && self.manager.settings().minimize_to_tray {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.exiting && self.tray_available() && self.manager.settings().minimize_to_tray {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        // The minimize button can do the same (Options, General).
+        let minimized = ctx.input(|i| i.viewport().minimized) == Some(true);
+        if minimized && !self.was_minimized && self.tray_available() && self.manager.settings().minimize_button_to_tray {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        self.was_minimized = minimized;
+        // eframe shows the window after its first frame whatever it was asked to do, so a
+        // hidden start has to hide it again.
+        if self.hidden_start.is_some() && self.rehide > 0 {
+            self.rehide -= 1;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        // Started hidden but no tray appeared: without this RDM would stay invisible for good.
+        if self.hidden_start.is_some_and(|t| t.elapsed() >= HIDDEN_START_GRACE) {
+            self.hidden_start = None;
+            if !self.tray_available() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
         }
         let auto = self.manager.settings().check_updates;
         self.updater.tick(&self.rt, auto);
         // Keep polling while hidden so tray and browser requests are handled.
         ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    /// Only the window's size and place are kept between runs, not egui's internal state.
+    fn persist_egui_memory(&self) -> bool {
+        false
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1325,6 +1558,9 @@ impl eframe::App for App {
         let p = theme::palette(ui);
         let all = self.manager.items();
         let visible = self.visible_items(&all);
+        self.shortcuts(&ctx, &visible);
+        self.dropped_files(&ctx);
+        self.drop_hint(&ctx);
 
         // A narrow window gets the icon-strip sidebar so the list keeps its room.
         let compact = ui.available_width() < 900.0;

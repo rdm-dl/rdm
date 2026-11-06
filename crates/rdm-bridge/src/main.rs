@@ -27,6 +27,10 @@ struct Download {
     headers: Option<std::collections::BTreeMap<String, String>>,
     /// Skip the confirmation dialog.
     silent: bool,
+    /// Wait in the queue: a show's episodes shouldn't all start at once.
+    queued: bool,
+    /// A folder inside the default one.
+    folder: Option<String>,
 }
 
 impl Download {
@@ -38,6 +42,7 @@ impl Download {
             file_name: self.filename.clone().filter(|s| !s.is_empty()),
             user_agent: self.user_agent.clone().filter(|s| !s.is_empty()),
             post_data: self.post_data.clone(),
+            subfolder: self.folder.clone().filter(|s| !s.is_empty()),
             headers: self
                 .headers
                 .iter()
@@ -114,7 +119,7 @@ async fn handle(client: &mut Option<Client>, msg: Value) -> Value {
         "hello" | "settings" => Request::Capture,
         "download" => {
             let d: Download = serde_json::from_value(msg).unwrap_or_default();
-            Request::Add { request: d.request(), start_now: d.silent, interactive: !d.silent }
+            Request::Add { request: d.request(), start_now: d.silent && !d.queued, interactive: !d.silent && !d.queued }
         }
         "links" => {
             let links: Vec<Download> = msg.get("links").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
@@ -125,10 +130,25 @@ async fn handle(client: &mut Option<Client>, msg: Value) -> Value {
             Request::Media { request: d.request(), title: d.title.clone(), kind: d.kind.clone().unwrap_or_else(|| "video".into()) }
         }
         "show" => Request::Show,
+        "episodes" => Request::Episodes { url: msg.get("url").and_then(Value::as_str).unwrap_or_default().to_string() },
+        "start-queue" => Request::StartQueue,
+        "sign-in" => Request::SignIn { list: msg.get("list").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default() },
+        "site" => Request::Site {
+            url: msg.get("url").and_then(Value::as_str).unwrap_or_default().to_string(),
+            cookies: msg.get("cookies").and_then(Value::as_str).map(String::from),
+        },
         other => return json!({"type": "error", "message": format!("unknown message {other}")}),
     };
     match c.call(req).await {
-        Ok(Response::Capture { settings }) => json!({"type": "settings", "version": env!("CARGO_PKG_VERSION"), "capture": settings}),
+        Ok(Response::Episodes { list }) => json!({"type": "episodes", "list": list}),
+        Ok(Response::Capture { settings, sites, sign_ins, browser_sites }) => {
+            let mut capture = json!(settings);
+            capture["sites"] = json!(sites);
+            capture["sign_ins"] = json!(sign_ins);
+            capture["browser_sites"] = json!(browser_sites);
+            json!({"type": "settings", "version": env!("CARGO_PKG_VERSION"), "capture": capture})
+        }
+        Ok(Response::Site { url, title, duration }) => json!({"type": "site", "url": url, "title": title, "duration": duration}),
         Ok(Response::Added { id }) => json!({"type": "accepted", "id": id}),
         Ok(Response::Ok) => json!({"type": "ok"}),
         Ok(Response::Error { message }) => json!({"type": "error", "message": message}),
