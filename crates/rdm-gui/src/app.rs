@@ -255,6 +255,18 @@ impl App {
         self.add_url = Some(AddUrl::from_clipboard(self.clipboard.as_mut()));
     }
 
+    /// Before a dialog opens for something sent from outside. It's drawn with the main window,
+    /// which gets no frames while minimized. Otherwise the dialog takes the focus itself when
+    /// it opens; on Linux nothing keeps it above the main window, so raising that as well can
+    /// cover the dialog.
+    fn make_way_for_dialog(ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().minimized) == Some(true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        } else if !cfg!(target_os = "linux") {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
     fn poll_external(&mut self, ctx: &egui::Context) {
         while let Ok(req) = self.ui_rx.try_recv() {
             match req {
@@ -271,10 +283,11 @@ impl App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 UiRequest::ConfirmAdd(r) => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    Self::make_way_for_dialog(ctx);
                     self.open_file_info(r);
                 }
                 UiRequest::ConfirmMany(rs) => {
+                    Self::make_way_for_dialog(ctx);
                     let mut b = Batch::default();
                     b.links = rs.into_iter().map(|r| (true, r)).collect();
                     self.batch = Some(b);

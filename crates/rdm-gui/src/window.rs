@@ -43,13 +43,36 @@ pub fn show<R>(ctx: &egui::Context, key: impl Hash + std::fmt::Debug, spec: Spec
     if let Some(p) = placement(ctx, vid, spec.size) {
         b = b.with_position(p);
     }
+    let opening = just_opened(ctx, vid);
     ctx.show_viewport_immediate(vid, b, |ui, class| {
         if class == ViewportClass::Immediate {
             own_new_windows();
+            if opening {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
         }
         let closed = ui.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape));
         (add(ui), closed)
     })
+}
+
+/// True for a dialog's first moments. A dialog that asks for attention then ends up in front
+/// of the main window and the browser: only Windows keeps it above the main window by itself,
+/// and a window can't take the focus until the window manager has shown it.
+fn just_opened(ctx: &egui::Context, vid: ViewportId) -> bool {
+    const FRONT_FOR: f64 = 0.6;
+    let id = Id::new(("rdm-dialog-opened", vid));
+    let (pass, now) = (ctx.cumulative_pass_nr(), ctx.input(|i| i.time));
+    let opened = match ctx.data(|d| d.get_temp::<(f64, u64)>(id)) {
+        Some((t, last)) if pass <= last + 2 => t,
+        _ => now,
+    };
+    ctx.data_mut(|d| d.insert_temp(id, (opened, pass)));
+    let opening = now - opened < FRONT_FOR;
+    if opening {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    opening
 }
 
 /// Where a dialog opens: centred on the main window when it (re)opens, then left where the

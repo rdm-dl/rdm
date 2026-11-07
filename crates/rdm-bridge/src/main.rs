@@ -74,6 +74,46 @@ fn write_message(stdout: &mut impl Write, v: &Value) {
     let _ = stdout.flush();
 }
 
+/// Start the app so that it outlives this helper, which ends after every message.
+///
+/// Firefox and browsers built on it (Zen, LibreWolf, Waterfox) run a helper inside a job on
+/// Windows and end the whole job when the helper exits, and signal its process group
+/// elsewhere. So the app leaves the job, or gets a group of its own. It also doesn't keep
+/// this helper's pipes to the browser.
+fn start_app(app: &std::path::Path, args: &[&str]) -> std::io::Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+    let mut c = Command::new(app);
+    c.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        keep_pipes_from_children();
+        c.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
+        if let Ok(child) = c.spawn() {
+            return Ok(child);
+        }
+        // A job that doesn't allow leaving refuses the start: go without.
+        c.creation_flags(0);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
+    c.spawn()
+}
+
+/// New processes inherit every inheritable handle, whatever their own stdin and stdout are.
+#[cfg(windows)]
+fn keep_pipes_from_children() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    for h in [std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()] {
+        unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) };
+    }
+}
+
 /// Connect to the app; start it (minimized) only when `launch` is set, i.e. for something
 /// the user did (a download, "Open RDM"), never for the extension's background checks.
 async fn connect(launch: bool) -> Option<Client> {
@@ -88,7 +128,7 @@ async fn connect(launch: bool) -> Option<Client> {
     }
     let exe = std::env::current_exe().ok()?;
     let app = exe.with_file_name(if cfg!(windows) { "rdm-gui.exe" } else { "rdm-gui" });
-    std::process::Command::new(app).arg("--minimized").spawn().ok()?;
+    start_app(&app, &["--minimized"]).ok()?;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if let Ok(mut c) = Client::connect(&dir).await {
@@ -185,5 +225,44 @@ mod tests {
         write_message(&mut buf, &json!({"type": "hello"}));
         let back = read_message(&mut buf.as_slice()).unwrap();
         assert_eq!(back["type"], "hello");
+    }
+
+    /// A Firefox-based browser ends its job when the helper exits. An app left in that job
+    /// dies a moment after it starts.
+    #[cfg(windows)]
+    #[test]
+    fn app_starts_outside_the_browsers_job() {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        // A helper in a job set up the way Firefox sets it up, which then starts the app.
+        let cmd = std::path::PathBuf::from(std::env::var_os("ComSpec").unwrap());
+        let in_job = |child: &std::process::Child, job| {
+            let mut yes = 0;
+            assert_ne!(unsafe { IsProcessInJob(child.as_raw_handle(), job, &mut yes) }, 0);
+            yes != 0
+        };
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            assert!(!job.is_null());
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            let size = std::mem::size_of_val(&info) as u32;
+            assert_ne!(SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const info).cast(), size), 0);
+            assert_ne!(AssignProcessToJobObject(job, GetCurrentProcess()), 0);
+
+            let mut ordinary = std::process::Command::new(&cmd).args(["/c", "ping -n 2 127.0.0.1 >nul"]).creation_flags(0).spawn().unwrap();
+            let mut app = start_app(&cmd, &["/c", "ping -n 2 127.0.0.1 >nul"]).unwrap();
+            assert!(in_job(&ordinary, job), "the test's job isn't working");
+            assert!(!in_job(&app, job), "the app stayed in the browser's job");
+            let _ = (ordinary.wait(), app.wait());
+            CloseHandle(job);
+        }
     }
 }
